@@ -7,4 +7,6 @@ Communicates with Bluez / bluetoothd.
 
 Built with CMake.
 
-
+Tested on:
+- Ascensia Contour Next
+- Roche Accu-Chek Guide Me
