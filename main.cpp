@@ -739,14 +739,14 @@ static void check_gatt_services(const std::string &device_path, const ManagedObj
                         // std::cout << "Found Characteristic at: " << path << "\n" << "  UUID:    " << uuid << "\n";
                         // print_characteristic_properties(property_map);
                         if (characteristic_uuid == RECORD_ACCESS_CONTROL_POINT_CHARACTERISTIC_UUID) {
-                            racp_characteristic = get_characteristic(path, characteristic_property_map);
+                            racp_characteristic = get_characteristic(cpath, characteristic_property_map);
                         }
                         if (characteristic_uuid == GLUCOSE_MEASUREMENT_CHARACTERISTIC_UUID) {
-                            glucose_measurement_characteristic = get_characteristic(path, characteristic_property_map);
+                            glucose_measurement_characteristic = get_characteristic(cpath, characteristic_property_map);
                         }
                         if (characteristic_uuid == GLUCOSE_MEASUREMENT_CONTEXT_CHARACTERISTIC_UUID) {
                             glucose_measurement_context_characteristic = get_characteristic(
-                                path, characteristic_property_map);
+                                cpath, characteristic_property_map);
                         }
                     }
                 }
