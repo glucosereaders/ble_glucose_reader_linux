@@ -3,9 +3,10 @@ Bluetooth LE application for linux to read glucose measurements from sensors / m
 Application reads from meter and stores measurements to file.
 
 Written in C++20, using dbus-cxx 2 (https://github.com/dbus-cxx/dbus-cxx).
-Communicates with Bluez / bluetoothd.
+Communicates with Bluez / bluetoothd over DBus.
 
-Built with CMake.
+Built with CMake (>= 3.22)
+Depends on libsigc++-3.0.
 
 Tested on:
 - Ascensia Contour Next
