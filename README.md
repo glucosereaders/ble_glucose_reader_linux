@@ -11,3 +11,5 @@ Depends on libsigc++-3.0.
 Tested on:
 - Ascensia Contour Next
 - Roche Accu-Chek Guide Me
+
+
