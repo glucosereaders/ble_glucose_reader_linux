@@ -157,7 +157,9 @@ namespace {
         if (!provided_filename.empty()) {
             output_filename = provided_filename;
         } else {
-            output_filename = selected_device.name +  std::format("_{:%Y%m%d_%H%M%S}.csv", std::chrono::floor<std::chrono::seconds>(local_time.get_local_time()));
+            output_filename = selected_device.name + std::format("_{:%Y%m%d_%H%M%S}.csv",
+                                                                 std::chrono::floor<std::chrono::seconds>(
+                                                                     local_time.get_local_time()));
         }
 
         std::filesystem::remove(output_filename);
@@ -301,6 +303,73 @@ namespace {
             device.discoverable = discoverable;
         }
         return device;
+    }
+
+
+    void print_help(const std::string& app_name) {
+        std::cout << "Usage: " << app_name << " [OPTION]...\n\
+Read measurements from glucose meter device \n\
+\n\
+  -d, --debug                  display debug messages\n\
+  -u, --unit=UNIT              choose output measurement unit. UNIT types are [mmol] (for mmol per liter; default unit) or [mg] (mg per dL)\n\
+  -s, --scan-interval=SECONDS  scan interval (in seconds). Default is 5 seconds.\n\
+  -f, --filename=FILENAME                  set output filename. Overrides automatic filename creation.\n\
+\n";
+    }
+
+
+    bool parse_options(const char **argv) {
+        argh::parser cmdl({"-u", "--unit", "-f", "-s", "--scan-interval"});
+        cmdl.parse(argv);
+
+        const std::filesystem::path fullPath = cmdl[0];
+        const auto app_name = fullPath.filename().string();
+
+        debug_messages = cmdl[{"d", "debug", "v", "verbose"}];
+
+        if (debug_messages) {
+            std::cout << "Debug mode is on\n";
+        }
+
+        if (cmdl[{"h", "help"}]) {
+            print_help(app_name);
+            return false;
+        }
+
+
+        if (std::string provided_unit = cmdl({"u", "unit"}).str(); !provided_unit.empty()) {
+            if (provided_unit == "mmol") {
+                if (debug_messages) {
+                    std::cout << "Provided unit = mmol/L (EU)\n";
+                }
+                output_measurement_unit = MMOL_PER_L;
+            } else if (provided_unit == "mg") {
+                if (debug_messages) {
+                    std::cout << "Provided unit = mg/dL (US)\n";
+                }
+                output_measurement_unit = MG_PER_DL;
+            } else {
+                std::cerr << "Invalid value for unit: " << provided_unit << '\n';
+                return false;
+            }
+        }
+
+        if (std::string scan_interval_str = cmdl({"s", "scan-interval"}).str(); !scan_interval_str.empty()) {
+            try {
+                const auto s_interval = static_cast<uint8_t>(stoi(scan_interval_str));
+                scan_interval_secs = s_interval;
+                std::cout << "Scan interval: " << static_cast<int>(scan_interval_secs) << '\n';
+            } catch ([[maybe_unused]] const std::exception &e) {
+                std::cerr << "Invalid value for scan interval: " << scan_interval_str << '\n';
+                return false;
+            }
+        }
+
+        if (std::string filename_str = cmdl({"f", "filename"}).str(); !filename_str.empty()) {
+            provided_filename = filename_str;
+        }
+
+        return true;
     }
 }
 
@@ -881,78 +950,6 @@ static void remove_device_from_cache() {
     }
 }
 
-
-void print_help(std::string app_name) {
-    std::cout << "Usage: " << app_name << " [OPTION]...\n\
-Read measurements from glucose meter device \n\
-\n\
-  -d, --debug                  display debug messages\n\
-  -u, --unit=UNIT              choose output measurement unit. UNIT types are [mmol] (for mmol per liter; default unit) or [mg] (mg per dL)\n\
-  -s, --scan-interval=SECONDS  scan interval (in seconds). Default is 5 seconds.\n\
-  -f, --filename=FILENAME                  set output filename. Overrides automatic filename creation.\n\
-\n";
-}
-
-
-
-bool parse_options(const char **argv) {
-    argh::parser cmdl({"-u", "--unit", "-f", "-s", "--scan-interval"});
-    cmdl.parse(argv);
-
-    std::filesystem::path fullPath = cmdl[0];
-    auto app_name = fullPath.filename().string();
-
-    debug_messages = (cmdl[{"d", "debug", "v", "verbose"}]);
-
-    if (debug_messages) {
-        std::cout << "Debug mode is on\n";
-    }
-
-    if (cmdl[{"h", "help"}]) {
-        print_help(app_name);
-        return false;
-    }
-
-
-    std::string provided_unit = cmdl({"u", "unit"}).str();
-    if (!provided_unit.empty())
-    {
-        if (provided_unit == "mmol") {
-            if (debug_messages) {
-                std::cout << "Provided unit = mmol/L (EU)\n";
-            }
-            output_measurement_unit = MeasurementUnit::MMOL_PER_L;
-        } else if (provided_unit == "mg") {
-            if (debug_messages) {
-                std::cout << "Provided unit = mg/dL (US)\n";
-            }
-            output_measurement_unit = MeasurementUnit::MG_PER_DL;
-        } else {
-            std::cerr << "Invalid value for unit: " << provided_unit << '\n';
-            return false;
-        }
-    }
-
-    std::string scan_interval_str = cmdl({"s", "scan-interval"}).str();
-
-    if (!scan_interval_str.empty()) {
-        try {
-            auto s_interval = static_cast<uint8_t>(stoi(scan_interval_str));
-            scan_interval_secs = s_interval;
-            std::cout << "Scan interval: " << static_cast<int>(scan_interval_secs) << '\n';
-        } catch (const std::exception &e) {
-            std::cerr << "Invalid value for scan interval: " << scan_interval_str << '\n';
-            return false;
-        }
-    }
-
-    std::string filename_str = cmdl({"f", "filename"}).str();
-    if (!filename_str.empty()) {
-        provided_filename = filename_str;
-    }
-    
-    return true;
-}
 
 int main(int argc, const char *argv[]) {
     if (!parse_options(argv)) {
