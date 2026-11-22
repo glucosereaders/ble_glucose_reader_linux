@@ -173,9 +173,15 @@ namespace {
         // Header
         outFile << "date_time,measured_value,meal_context\n";
 
-        for (const auto &[date, time, value, meal_ctx]: measurements | std::views::values) {
+        for (auto &[date, time, value, meal_ctx]: measurements | std::views::values) {
+
+            if (output_measurement_unit == MG_PER_DL) {
+                value *= 18.02f;
+            }
+
             outFile << std::format("{:%Y-%m-%d}", date) << " " << std::format("{:%H:%M:%S}", time) << "," <<
                     std::format("{:.1f}", value) << ",";
+
             if (meal_ctx != 0) {
                 outFile << convert_meal_context_to_string(meal_ctx);
             }
@@ -231,14 +237,18 @@ namespace {
         const std::chrono::year_month_day new_ymd{dp};
         const std::chrono::hh_mm_ss new_tod{tp - dp};
 
-        auto inc_exp = 3;
+        // base units conversion
+
+        auto inc_exp = 3; // convert from mol/L to mmol/L
         if (!glucose_concentration_in_units_of_mol_per_l) {
-            inc_exp = 5;
+            inc_exp = 5; // convert from kg/L to mg/dl
         }
 
         float measured_value = time_offset_field_present
                                    ? convert_med_float_16(value[13], value[12], inc_exp)
                                    : convert_med_float_16(value[11], value[10], inc_exp);
+
+        // convert from mg/dL ro mmol/L
         if (!glucose_concentration_in_units_of_mol_per_l) {
             measured_value /= 18.016f;
         }
