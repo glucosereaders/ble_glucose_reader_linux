@@ -10,6 +10,7 @@
 
 #include "dbus-cxx/standard-interfaces/objectmanagerproxy.h"
 
+#include <argh.h>
 
 using namespace std::chrono_literals;
 
@@ -19,7 +20,6 @@ namespace {
     constexpr auto RECORD_ACCESS_CONTROL_POINT_CHARACTERISTIC_UUID = "00002a52-0000-1000-8000-00805f9b34fb";
     constexpr auto GLUCOSE_MEASUREMENT_CHARACTERISTIC_UUID = "00002a18-0000-1000-8000-00805f9b34fb";
     constexpr auto GLUCOSE_MEASUREMENT_CONTEXT_CHARACTERISTIC_UUID = "00002a34-0000-1000-8000-00805f9b34fb";
-    constexpr int SCAN_INTERVAL_SECONDS = 5;
 
     using PropertyMap = std::map<std::string, DBus::Variant>;
     using InterfaceMap = std::map<std::string, PropertyMap>;
@@ -122,6 +122,17 @@ namespace {
     std::shared_ptr<DBus::ObjectProxy> bluez_root_op;
     std::shared_ptr<DBus::ObjectProxy> adapter_op;
 
+    enum MeasurementUnit {
+        MMOL_PER_L, // millimoles per liter
+        MG_PER_DL // milligrams per deciliter
+    };
+
+    MeasurementUnit output_measurement_unit = MMOL_PER_L;
+
+    bool debug_messages = false;
+
+    uint8_t scan_interval_secs = 5; // s
+    uint16_t user_input_timeout_ms = 20000; // ms
 
     std::string convert_meal_context_to_string(const uint8_t meal_context) {
         switch (meal_context) {
@@ -265,10 +276,12 @@ namespace {
             auto data = props.at("AdvertisingFlags");
             const auto vflags = data.to_vector<uint8_t>();
             //std::cout << "[DBUS message] -> AdvertisingFlags: size = " << vflags.size() << "\n";
-            std::cout << " -> AdvertisingFlags: ";
-            for (const auto flag_char: vflags) {
-                std::cout << std::hex << std::setw(2) << std::setfill('0')
-                        << static_cast<unsigned int>(flag_char) << " ";
+            if (debug_messages) {
+                std::cout << " -> AdvertisingFlags: ";
+                for (const auto flag_char: vflags) {
+                    std::cout << std::hex << std::setw(2) << std::setfill('0')
+                            << static_cast<unsigned int>(flag_char) << " ";
+                }
             }
             std::cout << std::dec << std::endl;
             const auto flags = vflags[0];
@@ -285,9 +298,11 @@ static void on_properties_changed_when_scanning(const std::vector<uint8_t> &new_
         return;
     }
 
-    std::cout << "on_properties_changed_when_scanning: path = " << path << "\n";
-    std::cout << "on_properties_changed_when_scanning: flags = " << std::hex << std::setw(2) << std::setfill('0')
-            << static_cast<unsigned int>(new_flags[0]) << std::dec << std::endl;
+    if (debug_messages) {
+        std::cout << "on_properties_changed_when_scanning: path = " << path << "\n";
+        std::cout << "on_properties_changed_when_scanning: flags = " << std::hex << std::setw(2) << std::setfill('0')
+                << static_cast<unsigned int>(new_flags[0]) << std::dec << std::endl;
+    }
 
     const auto it = std::ranges::find_if(glucose_devices,
                                          [&](const GlucoseDevice &d) { return d.path == path; });
@@ -300,9 +315,11 @@ static void on_properties_changed_when_scanning(const std::vector<uint8_t> &new_
 
 
 static void on_connected_changed_when_connecting(const bool connected, const DBus::Path &path) {
-    std::cout << "on_properties_changed_when_connecting: path = " << path << "\n";
-    std::cout << "on_properties_changed_when_connecting: connected = " << std::boolalpha << connected <<
-            std::noboolalpha << "\n";
+    if (debug_messages) {
+        std::cout << "on_properties_changed_when_connecting: path = " << path << "\n";
+        std::cout << "on_properties_changed_when_connecting: connected = " << std::boolalpha << connected <<
+                std::noboolalpha << "\n";
+    }
 
     if (selected_device.path == path) {
         {
@@ -311,15 +328,19 @@ static void on_connected_changed_when_connecting(const bool connected, const DBu
         }
         connect_cv.notify_all();
     } else {
-        std::cout << "WTF" << '\n';
+        if (debug_messages) {
+            std::cout << "WTF" << '\n';
+        }
     }
 }
 
 
 static void on_services_resolved_changed_when_connecting(const bool resolved, const DBus::Path &path) {
-    std::cout << "on_services_resolved_changed_when_connecting: path = " << path << "\n";
-    std::cout << "on_services_resolved_changed_when_connecting: resolved = " << std::boolalpha << resolved <<
-            std::noboolalpha << "\n";
+    if (debug_messages) {
+        std::cout << "on_services_resolved_changed_when_connecting: path = " << path << "\n";
+        std::cout << "on_services_resolved_changed_when_connecting: resolved = " << std::boolalpha << resolved <<
+                std::noboolalpha << "\n";
+    }
 
     if (selected_device.path == path) {
         {
@@ -328,7 +349,9 @@ static void on_services_resolved_changed_when_connecting(const bool resolved, co
         }
         connect_cv.notify_all();
     } else {
-        std::cout << "WTF" << '\n';
+        if (debug_messages) {
+            std::cout << "WTF" << '\n';
+        }
     }
 }
 
@@ -337,37 +360,51 @@ static void on_properties_changed_when_pairing(const std::string &interface,
                                                PropertyMap changed_props,
                                                [[maybe_unused]] const std::vector<std::string> &invalidated_props,
                                                const DBus::Path &path) {
-    std::cout << "on_properties_changed_during_pairing: path = " << path << "\n";
+    if (debug_messages) {
+        std::cout << "on_properties_changed_during_pairing: path = " << path << "\n";
+    }
     for (const auto &key: std::views::keys(changed_props)) {
-        std::cout << "Key: " << key << '\n';
+        if (debug_messages) {
+            std::cout << "Key: " << key << '\n';
+        }
     }
 
     if (interface == "org.bluez.Device1") {
         if (changed_props.contains("Paired")) {
             const bool paired = changed_props.at("Paired").to_bool();
-            std::cout << "on_properties_changed_during_pairing() -> Device paired: " << std::boolalpha << paired <<
-                    std::noboolalpha << "\n";
+            if (debug_messages) {
+                std::cout << "on_properties_changed_during_pairing() -> Device paired: " << std::boolalpha << paired <<
+                        std::noboolalpha << "\n";
+            }
             selected_device.paired = paired;
         }
 
         if (changed_props.contains("Bonded")) {
             const bool bonded = changed_props.at("Bonded").to_bool();
-            std::cout << "on_properties_changed_during_pairing() -> Device bonded: " << std::boolalpha << bonded <<
-                    std::noboolalpha << "\n";
+            if (debug_messages) {
+                std::cout << "on_properties_changed_during_pairing() -> Device bonded: " << std::boolalpha << bonded <<
+                        std::noboolalpha << "\n";
+            }
             selected_device.bonded = bonded;
         }
 
         if (changed_props.contains("Connected")) {
             const bool connected = changed_props.at("Connected").to_bool();
-            std::cout << "on_properties_changed_during_pairing() -> Device Connected: " << std::boolalpha << connected
-                    << std::noboolalpha << "\n";
+            if (debug_messages) {
+                std::cout << "on_properties_changed_during_pairing() -> Device Connected: " << std::boolalpha <<
+                        connected
+                        << std::noboolalpha << "\n";
+            }
             selected_device.connected = connected;
         }
 
         if (changed_props.contains("ServicesResolved")) {
             const bool resolved = changed_props.at("ServicesResolved").to_bool();
-            std::cout << "on_properties_changed_during_pairing() -> Services Resolved:" << std::boolalpha << resolved <<
-                    std::noboolalpha << "\n";
+            if (debug_messages) {
+                std::cout << "on_properties_changed_during_pairing() -> Services Resolved:" << std::boolalpha <<
+                        resolved <<
+                        std::noboolalpha << "\n";
+            }
             selected_device.services_resolved = resolved;
         }
     }
@@ -376,7 +413,8 @@ static void on_properties_changed_when_pairing(const std::string &interface,
 
 static void on_properties_changed_for_glucose_measurement(const std::string &interface,
                                                           PropertyMap changed_props,
-                                                          [[maybe_unused]] const std::vector<std::string> &invalidated_props,
+                                                          [[maybe_unused]] const std::vector<std::string> &
+                                                          invalidated_props,
                                                           [[maybe_unused]] const DBus::Path &sender_path) {
     //std::cout << "on_properties_changed_for_glucose_measurement: " << "\n";
     //std::cout << " -> PropertiesChanged: " << interface << "\n";
@@ -385,8 +423,10 @@ static void on_properties_changed_for_glucose_measurement(const std::string &int
         //std::cout << "[DBUS message] -> GattCharacteristic1 Props changed: " << changed_props.size() << "\n";
         //std::cout << "Sender path: " << sender_path << "\n";
         if (changed_props.contains("Notifying")) {
-            std::cout << " -> Notifying: " << std::boolalpha << changed_props.at("Notifying").to_bool() <<
-                    std::noboolalpha << "\n";
+            if (debug_messages) {
+                std::cout << " -> Notifying: " << std::boolalpha << changed_props.at("Notifying").to_bool() <<
+                        std::noboolalpha << "\n";
+            }
         }
         if (changed_props.contains("Value")) {
             const std::vector<uint8_t> value = changed_props.at("Value").to_vector<uint8_t>();
@@ -424,17 +464,26 @@ static void on_properties_changed_for_racp([[maybe_unused]] const std::string &i
                                            PropertyMap changed_props,
                                            [[maybe_unused]] const std::vector<std::string> &invalidated_props,
                                            [[maybe_unused]] const DBus::Path &sender_path) {
-    std::cout << "\non_properties_changed_for_racp():\n";
+    if (debug_messages) {
+        std::cout << "\non_properties_changed_for_racp():\n";
+    }
     if (changed_props.contains("Notifying")) {
-        std::cout << " -> Notifying: " << std::boolalpha << changed_props.at("Notifying").to_bool() << std::noboolalpha
-                << "\n";
+        if (debug_messages) {
+            std::cout << " -> Notifying: " << std::boolalpha << changed_props.at("Notifying").to_bool() <<
+                    std::noboolalpha
+                    << "\n";
+        }
     }
     if (changed_props.contains("Value")) {
         const std::vector<uint8_t> value = changed_props.at("Value").to_vector<uint8_t>();
-        std::cout << " -> Value: ";
+        if (debug_messages) {
+            std::cout << " -> Value: ";
+        }
         for (const auto i: value) {
-            std::cout << std::hex << std::uppercase << std::setfill('0') << std::setw(2) << static_cast<int>(i) <<
-                    std::dec << " ";
+            if (debug_messages) {
+                std::cout << std::hex << std::uppercase << std::setfill('0') << std::setw(2) << static_cast<int>(i) <<
+                        std::dec << " ";
+            }
         }
         std::cout << "\n";
         {
@@ -449,13 +498,17 @@ static void on_properties_changed_for_racp([[maybe_unused]] const std::string &i
 
 static void on_properties_changed_for_glucose_measurement_context([[maybe_unused]] const std::string &interface,
                                                                   PropertyMap changed_props,
-                                                                  [[maybe_unused]] const std::vector<std::string> &invalidated_props,
+                                                                  [[maybe_unused]] const std::vector<std::string> &
+                                                                  invalidated_props,
                                                                   [[maybe_unused]] const DBus::Path &sender_path) {
     //std::cout << "on_properties_changed_for_glucose_measurement_context: " << "\n";
 
     if (changed_props.contains("Notifying")) {
-        std::cout << " -> Notifying: " << std::boolalpha << changed_props.at("Notifying").to_bool() << std::noboolalpha
-                << "\n";
+        if (debug_messages) {
+            std::cout << " -> Notifying: " << std::boolalpha << changed_props.at("Notifying").to_bool() <<
+                    std::noboolalpha
+                    << "\n";
+        }
     }
 
     if (changed_props.contains("Value")) {
@@ -504,13 +557,17 @@ static void add_glucose_device(DBus::Path path, InterfaceMap interfaces) {
                                                    [&](const GlucoseDevice &d) { return d.path == path; });
 
                     if (it == glucose_devices.end()) {
-                        std::cout << "Registering new device: " << path;
+                        if (debug_messages) {
+                            std::cout << "Registering new device: " << path << '\n';
+                        }
                         GlucoseDevice device = create_device_from_properties(props);
                         device.path = path;
 
 
                         // Add listener for updates to AdvertisingFlags
-                        std::cout << "Adding PropertiesChanged listener for AdvertisingFlags" << '\n';
+                        if (debug_messages) {
+                            std::cout << "Adding PropertiesChanged listener for AdvertisingFlags" << '\n';
+                        }
                         auto device_op = system_bus_connection->create_object_proxy("org.bluez", path);
                         auto adv_flags_pp = device_op->create_property<std::vector<uint8_t> >(
                             "org.bluez.Device1",
@@ -537,19 +594,6 @@ static void on_interfaces_added(const DBus::Path &path, const InterfaceMap &inte
     add_glucose_device(path, interfaces);
 }
 
-/*
-std::string on_request_pincode(DBus::Path device) {
-    std::cout << "Received request for pin code for device: " << device << "\n";
-    return "1234";
-}
-*/
-/*
-std::string get_passkey_from_cin() {
-    std::string passkey;
-    std::getline(std::cin, passkey);
-    return passkey;
-}
-*/
 
 static std::uint32_t get_passkey() {
     std::cout << "Enter passkey (6 digits): " << std::flush;
@@ -557,7 +601,7 @@ static std::uint32_t get_passkey() {
     pollfd pfd = {.fd = STDIN_FILENO, .events = POLLIN, .revents = 0};
 
     // Wait up to 15000 ms (15 seconds) for input to be available
-    const int ret = poll(&pfd, 1, 15000);
+    const int ret = poll(&pfd, 1, user_input_timeout_ms);
 
     if (ret > 0 && pfd.revents & POLLIN) {
         if (std::string passkey; std::getline(std::cin, passkey)) {
@@ -616,14 +660,41 @@ static void list_devices() {
 }
 
 static bool get_selection() {
-    std::cout << "Enter device number: ";
-    if (std::string dev_number; std::getline(std::cin, dev_number)) {
-        std::cout << std::format("Selected: {}\n", glucose_devices[std::stoi(dev_number) - 1].name);
-        selected_device = glucose_devices[std::stoi(dev_number) - 1];
-        return true;
+    std::cout << "Enter device number: " << std::flush;
+
+    pollfd pfd = {.fd = STDIN_FILENO, .events = POLLIN, .revents = 0};
+
+
+    // Wait up to 15000 ms (15 seconds) for input to be available
+    const int ret = poll(&pfd, 1, user_input_timeout_ms);
+
+    if (ret > 0 && pfd.revents & POLLIN) {
+        if (std::string dev_number; std::getline(std::cin, dev_number)) {
+            try {
+                if (debug_messages) {
+                    std::cout << std::format("\nSelected: {}\n", glucose_devices[std::stoi(dev_number) - 1].name);
+                }
+                selected_device = glucose_devices[std::stoi(dev_number) - 1];
+                return true;
+            } catch (const std::exception &e) {
+                std::cerr << "\nInvalid number format: " << e.what() << "\n";
+                return false;
+            }
+        }
+        std::cout << "\ngetline error" << '\n';
+        return false;
     }
+    if (ret == 0) {
+        std::cout << "\nNo device number entered in time\n";
+        pairing_timed_out = true;
+        return false;
+    }
+
+    std::cout << "\nUnknown error waiting for passkey input\n";
+
     return false;
 }
+
 /*
 static void print_characteristic_properties(const PropertyMap &props) {
     std::cout << "Characteristic Properties:\n";
@@ -733,7 +804,8 @@ static void check_gatt_services(const std::string &device_path, const ManagedObj
                     if (cpath.rfind(service_path + "/", 0) != 0) {
                         continue;
                     }
-                    if (auto characteristic_it = cinterfaces.find("org.bluez.GattCharacteristic1"); characteristic_it != cinterfaces.end()) {
+                    if (auto characteristic_it = cinterfaces.find("org.bluez.GattCharacteristic1");
+                        characteristic_it != cinterfaces.end()) {
                         const PropertyMap &characteristic_property_map = characteristic_it->second;
                         std::string characteristic_uuid = characteristic_property_map.at("UUID").to_string();
                         // std::cout << "Found Characteristic at: " << path << "\n" << "  UUID:    " << uuid << "\n";
@@ -759,19 +831,28 @@ static void check_gatt_services(const std::string &device_path, const ManagedObj
 static void init() {
     // Create a dispatcher
     dispatcher = DBus::StandaloneDispatcher::create();
-    std::cout << "Dispatcher created." << '\n';
+
+    if (debug_messages) {
+        std::cout << "Dispatcher created." << '\n';
+    }
 
     // Get connection to system bus
     system_bus_connection = dispatcher->create_connection(DBus::BusType::SYSTEM);
-    std::cout << "Connected to system bus." << '\n';
+    if (debug_messages) {
+        std::cout << "Connected to system bus." << '\n';
+    }
 
     // Create proxy to BlueZ root path
     bluez_root_op = system_bus_connection->create_object_proxy("org.bluez", "/");
-    std::cout << "Root object proxy created.\n";
+    if (debug_messages) {
+        std::cout << "Root object proxy created.\n";
+    }
 
     // Create proxy to adapter
     adapter_op = system_bus_connection->create_object_proxy("org.bluez", "/org/bluez/hci0");
-    std::cout << "Adapter object proxy created.\n";
+    if (debug_messages) {
+        std::cout << "Adapter object proxy created.\n";
+    }
 }
 
 
@@ -789,27 +870,103 @@ static void remove_device_from_cache() {
 }
 
 
-int main() {
+void print_help(std::string app_name) {
+    std::cout << "Usage: " << app_name << " [OPTION]...\n\
+Read measurements from glucose meter device \n\
+\n\
+  -d, --debug                  display debug messages\n\
+  -u, --unit=UNIT              choose output measurement unit. UNIT types are [mmol] (for mmol per liter; default unit) or [mg] (mg per dL)\n\
+  -s, --scan-interval=SECONDS  scan interval (in seconds). Default is 5 seconds.\n\
+\n";
+}
+
+bool parse_options(const char **argv) {
+    argh::parser cmdl({"-u", "--unit", "-f", "-s", "--scan-interval"});
+    cmdl.parse(argv);
+
+    std::filesystem::path fullPath = cmdl[0];
+    auto app_name = fullPath.filename().string();
+
+    debug_messages = (cmdl[{"d", "debug", "v", "verbose"}]);
+
+    if (debug_messages) {
+        std::cout << "Debug mode is on\n";
+    }
+
+    if (cmdl[{"h", "help"}]) {
+        print_help(app_name);
+        return false;
+    }
+
+
+    std::string provided_unit = cmdl({"u", "unit"}).str();
+    if (!provided_unit.empty())
+    {
+        if (provided_unit == "mmol") {
+            if (debug_messages) {
+                std::cout << "Provided unit = mmol/L (EU)\n";
+            }
+            output_measurement_unit = MeasurementUnit::MMOL_PER_L;
+        } else if (provided_unit == "mg") {
+            if (debug_messages) {
+                std::cout << "Provided unit = mg/dL (US)\n";
+            }
+            output_measurement_unit = MeasurementUnit::MG_PER_DL;
+        } else {
+            std::cerr << "Invalid value for unit: " << provided_unit << '\n';
+            return false;
+        }
+    }
+
+    std::string scan_interval_str = cmdl({"s", "scan-interval"}).str();
+
+    if (!scan_interval_str.empty()) {
+        try {
+            auto s_interval = static_cast<uint8_t>(stoi(scan_interval_str));
+            scan_interval_secs = s_interval;
+            std::cout << "Scan interval: " << static_cast<int>(scan_interval_secs) << '\n';
+        } catch (const std::exception &e) {
+            std::cerr << "Invalid value for scan interval: " << scan_interval_str << '\n';
+            return false;
+        }
+    }
+    
+    return true;
+}
+
+int main(int argc, const char *argv[]) {
+    if (!parse_options(argv)) {
+        return EXIT_FAILURE;
+    }
+
+    //return EXIT_SUCCESS;
+
     try {
         init();
 
         // Get managed devices
-        std::cout << "Retrieving managed objects." << '\n';
-
-        auto managed_objects_result = bluez_root_op->getObjectManagerInterface()->GetManagedObjects();
-        std::cout << "Managed objects retrieved.\n";
-
-        // Retrieve glucose devices from managed objects
-        std::cout << "Find managed glucose service devices." << '\n';
-        find_managed_glucose_devices(managed_objects_result);
-
-
-        if (glucose_devices.empty()) {
-            std::cout << "No glucose service devices found in managed objects.\n";
-        } else {
-            std::cout << "Found " << glucose_devices.size() << " glucose service devices in managed objects.\n";
+        if (debug_messages) {
+            std::cout << "Retrieving managed objects." << '\n';
         }
 
+        auto managed_objects_result = bluez_root_op->getObjectManagerInterface()->GetManagedObjects();
+        if (debug_messages) {
+            std::cout << "Managed objects retrieved.\n";
+        }
+
+        // Retrieve glucose devices from managed objects
+        if (debug_messages) {
+            std::cout << "Find managed glucose service devices." << '\n';
+        }
+        find_managed_glucose_devices(managed_objects_result);
+
+        if (debug_messages) {
+            if (glucose_devices.empty()) {
+                std::cout << "No glucose service devices found in managed objects.\n";
+            } else {
+                std::cout << "Found " << glucose_devices.size() << " glucose service devices in managed objects.\n";
+            }
+        }
 
         // Scan for devices
 
@@ -821,7 +978,9 @@ int main() {
 
         // Attach function handler
         auto interface_added_conn = interfaces_added_sp->connect(sigc::ptr_fun(&on_interfaces_added));
-        std::cout << "Registered listener for InterfacesAdded.\n";
+        if (debug_messages) {
+            std::cout << "Registered listener for InterfacesAdded.\n";
+        }
 
 
         // Define the hardware discovery filter parameters
@@ -842,7 +1001,9 @@ int main() {
             "org.bluez.Adapter1",
             "SetDiscoveryFilter");
 
-        std::cout << "Applying Glucose Profile UUID discovery filter (0x1808)\n";
+        if (debug_messages) {
+            std::cout << "Applying Glucose Profile UUID discovery filter (0x1808)\n";
+        }
 
         // Call the set filter proxy
         (*set_filter_mp)(discovery_filter);
@@ -851,36 +1012,49 @@ int main() {
         auto start_discovery_mp = adapter_op->create_method<void()>(
             "org.bluez.Adapter1",
             "StartDiscovery");
-        std::cout << "StartDiscovery method created.\n";
+        if (debug_messages) {
+            std::cout << "StartDiscovery method created.\n";
+        }
 
         // Create stop_discovery method proxy on adapter interface
         auto stop_discovery_mp = adapter_op->create_method<void()>(
             "org.bluez.Adapter1",
             "StopDiscovery");
-        std::cout << "StopDiscovery method created.\n";
+        if (debug_messages) {
+            std::cout << "StopDiscovery method created.\n";
+        }
 
         // Call the start discover proxy
-        std::cout << "Requesting BLE scan from bluetoothd\n";
+        if (debug_messages) {
+            std::cout << "Requesting BLE scan from bluetoothd\n";
+        }
         (*start_discovery_mp)();
 
         // Sleep N seconds
-        std::cout << "Scanning for " << SCAN_INTERVAL_SECONDS << " seconds...\n";
-        std::this_thread::sleep_for(std::chrono::seconds(SCAN_INTERVAL_SECONDS));
+        std::cout << "Scanning for " << static_cast<int>(scan_interval_secs) << " seconds...\n";
+        std::this_thread::sleep_for(std::chrono::seconds(scan_interval_secs));
 
         // Call the stop discover proxy
         (*stop_discovery_mp)();
-        std::cout << "Stopping BLE scan\n";
+        if (debug_messages) {
+            std::cout << "Stopping BLE scan\n";
+        }
 
         // Clean up callback for InterfacesAdded
-        if (auto signal_removed = bluez_root_op->getObjectManagerInterface()->remove_signal(interfaces_added_sp); !signal_removed) {
+        if (auto signal_removed = bluez_root_op->getObjectManagerInterface()->remove_signal(interfaces_added_sp); !
+            signal_removed) {
             std::cerr << "Failed to remove interfaces added signal.\n";
         }
         interface_added_conn.disconnect();
         interfaces_added_sp.reset();
-        std::cout << "Deregistered listener for InterfacesAdded.\n";
-        std::cout << "Discovery ended.\n";
+
+        if (debug_messages) {
+            std::cout << "Deregistered listener for InterfacesAdded.\n";
+            std::cout << "Discovery ended.\n";
+        }
 
         std::cout << "Glucose devices found: " << glucose_devices.size() << "\n";
+
 
         // Exit if no devices found
         if (glucose_devices.empty()) {
@@ -906,7 +1080,9 @@ int main() {
 
 
         // Clean up callback handler for AdvertisingFlags
-        std::cout << "Deregistering listener for AdvertisingFlags" << '\n';
+        if (debug_messages) {
+            std::cout << "Deregistering listener for AdvertisingFlags" << '\n';
+        }
         selected_device.pp->signal_property_changed().clear();
         selected_device.pp_conn.disconnect();
         selected_device.pp.reset();
@@ -927,14 +1103,16 @@ int main() {
 
 
             // Handle pairing
-            std::cout << "Handling pairing.\n";
-
+            if (debug_messages) {
+                std::cout << "Handling pairing.\n";
+            }
 
             // Create agent to handle pairing, as local object
             std::string agent_path = "/temp_agent/glucose_device_authenticator";
             auto pairing_agent = system_bus_connection->create_object(agent_path);
-            std::cout << "Created local pairing agent\n";
-
+            if (debug_messages) {
+                std::cout << "Created local pairing agent\n";
+            }
 
             // Create callback handler for RequestPasskey
             auto passkey_requested_method = pairing_agent->create_method<std::uint32_t(DBus::Path)>(
@@ -942,8 +1120,9 @@ int main() {
                 "RequestPasskey",
                 sigc::ptr_fun(&on_request_passkey)
             );
-            std::cout << "Pairing method created on local agent with callback listener function\n";
-
+            if (debug_messages) {
+                std::cout << "Pairing method created on local agent with callback listener function\n";
+            }
 
             // Create bluez manager proxy for registering local agent and default agent for passkey
             auto bluez_manager_op = system_bus_connection->create_object_proxy("org.bluez", "/org/bluez");
@@ -955,7 +1134,9 @@ int main() {
 
             // Register agent
             (*register_mp)(pairing_agent->path(), "KeyboardOnly");
-            std::cout << "Registered pairing agent\n";
+            if (debug_messages) {
+                std::cout << "Registered pairing agent\n";
+            }
 
             // Create request default agent, to register agent as default handler, as proxy object
             auto request_default_agent_mp = bluez_manager_op->create_method<void(DBus::Path)>(
@@ -964,8 +1145,9 @@ int main() {
 
             // Set agent as default handler
             (*request_default_agent_mp)(pairing_agent->path());
-            std::cout << "Registered pairing agent as default agent\n";
-
+            if (debug_messages) {
+                std::cout << "Registered pairing agent as default agent\n";
+            }
 
             // Create Pair method proxy
             auto pair_method_proxy = selected_device.op->create_method<void()>("org.bluez.Device1", "Pair");
@@ -979,7 +1161,9 @@ int main() {
             auto properties_changed_conn = device_props_signal->connect(
                 sigc::bind(sigc::ptr_fun(&on_properties_changed_when_pairing), selected_device.path));
 
-            std::cout << "Registered callback listener for PropertiesChanged\n";
+            if (debug_messages) {
+                std::cout << "Registered callback listener for PropertiesChanged\n";
+            }
 
             // Initiate pairing
             try {
@@ -987,7 +1171,7 @@ int main() {
                 std::cout << "Pairing completed\n";
             } catch (const DBus::ErrorNoReply &e) {
                 // Handle timeout (e.g., user took too long to enter PIN)
-                std::cout << "\nError NoReply: " << e.what() << "\n";
+                std::cerr << "Error NoReply: " << e.what() << "\n";
                 //return EXIT_FAILURE;
                 // Remove device
                 remove_device_from_cache();
@@ -995,9 +1179,9 @@ int main() {
                 std::abort();
             } catch (const DBus::Error &e) {
                 if (pairing_timed_out) {
-                    std::cout << "Pairing error: timed out" << std::endl;
+                    std::cerr << "Pairing error: timed out" << std::endl;
                 } else {
-                    std::cout << "\nPairing error: name: " << e.name() << ", what: " << e.what() << std::endl;
+                    std::cerr << "Pairing error: name: " << e.name() << ", what: " << e.what() << std::endl;
                 }
                 // Remove device
                 remove_device_from_cache();
@@ -1013,7 +1197,9 @@ int main() {
 
             // Clean up callback handler for pairing?
         } else {
-            std::cout << "Device is already bonded\n";
+            if (debug_messages) {
+                std::cout << "Device is already bonded\n";
+            }
         }
 
 
@@ -1050,7 +1236,11 @@ int main() {
 
             // Wait for connected event
             bool initial_connected = selected_device.connected_pp->value();
-            std::cout << "Init - Connected: " << initial_connected << std::endl;
+
+            if (debug_messages) {
+                std::cout << "Init - Connected: " << initial_connected << std::endl;
+            }
+
             {
                 std::unique_lock lock(connect_mutex);
 
@@ -1068,14 +1258,17 @@ int main() {
                 // Remove device
                 remove_device_from_cache();
 
-                std::cout << "Failed to connect to selected device. Exiting.\n";
+                std::cerr << "Failed to connect to selected device. Exiting.\n";
                 return EXIT_FAILURE;
             }
 
 
             // Wait for services resolved event
             bool initial_resolved = selected_device.services_resolved_pp->value();
-            std::cout << "Init - Services resolved: " << initial_resolved << std::endl;
+            if (debug_messages) {
+                std::cout << "Init - Services resolved: " << initial_resolved << std::endl;
+            }
+
             {
                 std::unique_lock lock(connect_mutex);
 
@@ -1088,30 +1281,38 @@ int main() {
                 });
             }
 
-            std::cout << "Device bonded: " << std::boolalpha << selected_device.bonded << std::noboolalpha << "\n";
-            std::cout << "Device connected: " << std::boolalpha << selected_device.connected << std::noboolalpha <<
-                    "\n";
-            std::cout << "Services resolved: " << std::boolalpha << selected_device.services_resolved <<
-                    std::noboolalpha << "\n";
+            if (debug_messages) {
+                std::cout << "Device bonded: " << std::boolalpha << selected_device.bonded << std::noboolalpha << "\n";
+                std::cout << "Device connected: " << std::boolalpha << selected_device.connected << std::noboolalpha <<
+                        "\n";
+                std::cout << "Services resolved: " << std::boolalpha << selected_device.services_resolved <<
+                        std::noboolalpha << "\n";
+            }
 
             if (!selected_device.services_resolved) {
                 // Remove device
                 remove_device_from_cache();
 
-                std::cout << "Failed to resolve services. Exiting.\n";
+                std::cerr << "Failed to resolve services. Exiting.\n";
                 return EXIT_FAILURE;
             }
         } else {
-            std::cout << "Device is already connected and services are resolved.\n";
+            if (debug_messages) {
+                std::cout << "Device is already connected and services are resolved.\n";
+            }
         }
 
 
         // Retrieve GATT services from managed objects
         managed_objects_result = bluez_root_op->getObjectManagerInterface()->GetManagedObjects();
-        std::cout << "Managed objects retrieved.\n";
+        if (debug_messages) {
+            std::cout << "Managed objects retrieved.\n";
+        }
 
         // Check for glucose service GATT services
-        std::cout << "Checking glucose GATT service" << '\n';
+        if (debug_messages) {
+            std::cout << "Checking glucose GATT service" << '\n';
+        }
         check_gatt_services(selected_device.path, managed_objects_result);
 
 
@@ -1120,8 +1321,9 @@ int main() {
         // Create proxy object to glucose measurement characteristic
         auto glucose_measurement_characteristic_op = system_bus_connection->create_object_proxy(
             "org.bluez", glucose_measurement_characteristic.path);
-        std::cout << "glucose measurement characteristic object proxy created.\n";
-
+        if (debug_messages) {
+            std::cout << "glucose measurement characteristic object proxy created.\n";
+        }
 
         // Create signal proxy for glucose measurement characteristic properties changed
         auto glucose_measurement_properties_changed_sp = glucose_measurement_characteristic_op->create_signal<
@@ -1133,7 +1335,9 @@ int main() {
         DBus::Path gmc_path = glucose_measurement_characteristic_op->path();
         glucose_measurement_properties_changed_sp->connect(
             sigc::bind(sigc::ptr_fun(&on_properties_changed_for_glucose_measurement), gmc_path));
-        std::cout << "glucose measurement characteristic properties changed signal proxy registered\n";
+        if (debug_messages) {
+            std::cout << "glucose measurement characteristic properties changed signal proxy registered\n";
+        }
 
         // Call StartNotify
         auto glucose_measurement_start_notify_mp = glucose_measurement_characteristic_op->create_method<void()>(
@@ -1154,8 +1358,9 @@ int main() {
             // Create proxy object to glucose measurement context characteristic
             glucose_measurement_context_characteristic_op = system_bus_connection->create_object_proxy(
                 "org.bluez", glucose_measurement_context_characteristic.path);
-            std::cout << "glucose measurement context characteristic object proxy created.\n";
-
+            if (debug_messages) {
+                std::cout << "glucose measurement context characteristic object proxy created.\n";
+            }
             // Create signal proxy for glucose measurement context characteristic properties changed
             glucose_measurement_context_properties_changed_sp =
                     glucose_measurement_context_characteristic_op->create_signal<PropertiesChangedSignature>(
@@ -1166,8 +1371,9 @@ int main() {
             DBus::Path gmcc_path = glucose_measurement_context_characteristic_op->path();
             glucose_measurement_context_properties_changed_sp->connect(
                 sigc::bind(sigc::ptr_fun(&on_properties_changed_for_glucose_measurement_context), gmcc_path));
-            std::cout << "glucose measurement context characteristic properties changed signal proxy registered\n";
-
+            if (debug_messages) {
+                std::cout << "glucose measurement context characteristic properties changed signal proxy registered\n";
+            }
             // Call StartNotify
             glucose_measurement_context_start_notify_mp = glucose_measurement_context_characteristic_op->
                     create_method<void()>(
@@ -1182,8 +1388,9 @@ int main() {
         // Create proxy object to  RACP characteristic
         auto racp_characteristic_op = system_bus_connection->create_object_proxy(
             "org.bluez", racp_characteristic.path);
-        std::cout << "RACP characteristic object proxy created\n";
-
+        if (debug_messages) {
+            std::cout << "RACP characteristic object proxy created\n";
+        }
         // Create signal proxy for RACP characteristic properties changed
         auto racp_properties_changed_sp = racp_characteristic_op->create_signal<PropertiesChangedSignature>(
             "org.freedesktop.DBus.Properties",
@@ -1192,8 +1399,9 @@ int main() {
         // Register listener for RACP characteristic properties changed signal proxy
         DBus::Path racp_path = racp_characteristic_op->path();
         racp_properties_changed_sp->connect(sigc::bind(sigc::ptr_fun(&on_properties_changed_for_racp), racp_path));
-        std::cout << "RACP characteristic properties changed signal proxy registered\n";
-
+        if (debug_messages) {
+            std::cout << "RACP characteristic properties changed signal proxy registered\n";
+        }
         // Call StartNotify
         auto racp_start_notify_mp = racp_characteristic_op->create_method<void()>(
             "org.bluez.GattCharacteristic1",
@@ -1234,7 +1442,9 @@ int main() {
 
         try {
             (*write_value)(data, options);
-            std::cout << "Sent request to device.\n";
+            if (debug_messages) {
+                std::cout << "Sent request to device.\n";
+            }
         } catch (const DBus::Error &e) {
             std::cerr << "WriteValue failed: " << e.name() << " - " << e.message() << std::endl;
         }
@@ -1246,65 +1456,68 @@ int main() {
         writing_cv.wait_for(lock, 25000ms, [] { return racp_writing_completed; });
 
         if (racp_writing_completed) {
-            std::cout << "RACP write completed.\n";
+            if (debug_messages) {
+                std::cout << "RACP write completed.\n";
+            }
             auto now = std::chrono::steady_clock::now();
 
             auto ms = std::chrono::duration_cast<std::chrono::milliseconds>(now - then);
             std::chrono::duration<double> sec = now - then;
-
-            std::cout << "Elapsed (integer ms): " << ms.count() << " ms\n";
-            std::cout << "Elapsed (fractional sec): " << sec.count() << " s\n";
+            if (debug_messages) {
+                std::cout << "Elapsed (integer ms): " << ms.count() << " ms\n";
+                std::cout << "Elapsed (fractional sec): " << sec.count() << " s\n";
+            }
         } else {
-            std::cout << "RACP write not completed.\n";
-            std::cout << "Read " << measurements.size() << " measurements" << std::endl;
-            std::cout << "Try to reconnect the device\n";
+            std::cerr << "RACP write not completed.\n";
+            std::cerr << "Read " << measurements.size() << " measurements" << std::endl;
+            std::cerr << "Try to reconnect the device\n";
             remove_device_from_cache();
             return EXIT_FAILURE;
         }
 
         std::cout << "Read " << measurements.size() << " measurements" << std::endl;
 
-/*
-        // Stop notifications on characteristics
-        auto racp_stop_notify_mp = racp_characteristic_op->create_method<void()>(
-            "org.bluez.GattCharacteristic1",
-            "StopNotify"
-        );
-        try {
-            (*racp_stop_notify_mp)();
-            std::cout << "Sent RACP StopNotify to device.\n";
-        } catch (const DBus::Error &e) {
-            std::cerr << "RACP StopNotify failed: " << e.name() << " - " << e.message() << std::endl;
-        }
+        /*
+                // Stop notifications on characteristics
+                auto racp_stop_notify_mp = racp_characteristic_op->create_method<void()>(
+                    "org.bluez.GattCharacteristic1",
+                    "StopNotify"
+                );
+                try {
+                    (*racp_stop_notify_mp)();
+                    std::cout << "Sent RACP StopNotify to device.\n";
+                } catch (const DBus::Error &e) {
+                    std::cerr << "RACP StopNotify failed: " << e.name() << " - " << e.message() << std::endl;
+                }
 
 
-        if (!glucose_measurement_context_characteristic.uuid.empty()) {
-            auto glucose_measurement_context_stop_notify_mp = glucose_measurement_context_characteristic_op->
-                    create_method<void()>(
-                        "org.bluez.GattCharacteristic1",
-                        "StopNotify"
-                    );
-            try {
-                (*glucose_measurement_context_stop_notify_mp)();
-                std::cout << "Sent glucose measurement context StopNotify to device.\n";
-            } catch (const DBus::Error &e) {
-                std::cerr << "glucose measurement context StopNotify failed: " << e.name() << " - " << e.message() <<
-                        std::endl;
-            }
-        }
+                if (!glucose_measurement_context_characteristic.uuid.empty()) {
+                    auto glucose_measurement_context_stop_notify_mp = glucose_measurement_context_characteristic_op->
+                            create_method<void()>(
+                                "org.bluez.GattCharacteristic1",
+                                "StopNotify"
+                            );
+                    try {
+                        (*glucose_measurement_context_stop_notify_mp)();
+                        std::cout << "Sent glucose measurement context StopNotify to device.\n";
+                    } catch (const DBus::Error &e) {
+                        std::cerr << "glucose measurement context StopNotify failed: " << e.name() << " - " << e.message() <<
+                                std::endl;
+                    }
+                }
 
-        auto glucose_measurement_stop_notify_mp = glucose_measurement_characteristic_op->create_method<void()>(
-            "org.bluez.GattCharacteristic1",
-            "StopNotify"
-        );
-        try {
-            (*glucose_measurement_stop_notify_mp)();
-            std::cout << "Sent glucose measurement StopNotify to device.\n";
-        } catch (const DBus::Error &e) {
-            std::cerr << "glucose measurement StopNotify failed: " << e.name() << " - " << e.message() << std::endl;
-        }
+                auto glucose_measurement_stop_notify_mp = glucose_measurement_characteristic_op->create_method<void()>(
+                    "org.bluez.GattCharacteristic1",
+                    "StopNotify"
+                );
+                try {
+                    (*glucose_measurement_stop_notify_mp)();
+                    std::cout << "Sent glucose measurement StopNotify to device.\n";
+                } catch (const DBus::Error &e) {
+                    std::cerr << "glucose measurement StopNotify failed: " << e.name() << " - " << e.message() << std::endl;
+                }
 
-*/
+        */
         // Clean up connection
         auto disconnect_method_proxy = selected_device.op->create_method<void()>("org.bluez.Device1", "Disconnect");
         //auto disconnect_call = disconnect_method_proxy->create_call_message();
@@ -1313,9 +1526,11 @@ int main() {
         try {
             auto return_future_message = disconnect_method_proxy->call_async();
             system_bus_connection->flush();
-            std::cout << "Device disconnected" << std::endl;
+            if (debug_messages) {
+                std::cout << "Device disconnected" << std::endl;
+            }
         } catch ([[maybe_unused]] const DBus::Error &e) {
-            std::cout << "Device disconnection failure." << std::endl;
+            std::cerr << "Device disconnection failure." << std::endl;
             return EXIT_FAILURE;
         }
 

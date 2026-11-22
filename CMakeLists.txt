@@ -32,6 +32,18 @@ FetchContent_Declare(
 )
 FetchContent_MakeAvailable(dbus_cxx)
 
+FetchContent_Declare(
+        argh
+        GIT_REPOSITORY https://github.com/adishavit/argh.git
+        GIT_TAG        master
+)
+
+# 3. Disable argh's own tests and examples so they don't clutter your build
+set(BUILD_TESTS OFF CACHE BOOL "" FORCE)
+set(BUILD_EXAMPLES OFF CACHE BOOL "" FORCE)
+
+# 4. Download and make the 'argh' target available
+FetchContent_MakeAvailable(argh)
 
 add_executable(read_glucose_meter_ble main.cpp)
 
@@ -46,7 +58,9 @@ target_include_directories(read_glucose_meter_ble PRIVATE
         "${dbus_cxx_BINARY_DIR}"
 )
 
-target_link_libraries(read_glucose_meter_ble PRIVATE dbus-cxx)
+target_include_directories(read_glucose_meter_ble PRIVATE "${argh_INCLUDE_DIR}")
+target_link_libraries(read_glucose_meter_ble PRIVATE dbus-cxx argh)
+target_link_libraries(read_glucose_meter_ble PRIVATE argh)
 
 install(TARGETS read_glucose_meter_ble RUNTIME DESTINATION .)
 install(TARGETS dbus-cxx LIBRARY DESTINATION .)
