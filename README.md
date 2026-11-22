@@ -12,4 +12,7 @@ Tested on:
 - Ascensia Contour Next
 - Roche Accu-Chek Guide Me
 
+Measurements are stored to file with name format:
+[device name]_[date]_[time].[csv|json]
+
 

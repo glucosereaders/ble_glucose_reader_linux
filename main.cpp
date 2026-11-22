@@ -134,6 +134,9 @@ namespace {
     uint8_t scan_interval_secs = 5; // s
     uint16_t user_input_timeout_ms = 20000; // ms
 
+    std::string provided_filename;
+
+
     std::string convert_meal_context_to_string(const uint8_t meal_context) {
         switch (meal_context) {
             case 1: return "Preprandial";
@@ -147,7 +150,16 @@ namespace {
 
 
     void write_measurements_to_file() {
-        const std::string output_filename = "glucose_measurements.csv";
+        auto now = std::chrono::system_clock::now();
+        std::chrono::zoned_time local_time{std::chrono::current_zone(), now};
+
+        std::string output_filename;
+        if (!provided_filename.empty()) {
+            output_filename = provided_filename;
+        } else {
+            output_filename = selected_device.name +  std::format("_{:%Y%m%d_%H%M%S}.csv", std::chrono::floor<std::chrono::seconds>(local_time.get_local_time()));
+        }
+
         std::filesystem::remove(output_filename);
         std::ofstream outFile(output_filename);
 
@@ -157,7 +169,7 @@ namespace {
         }
 
         // Header
-        outFile << "timestamp,measured_value_mmol_per_l,meal_context\n";
+        outFile << "date_time,measured_value,meal_context\n";
 
         for (const auto &[date, time, value, meal_ctx]: measurements | std::views::values) {
             outFile << std::format("{:%Y-%m-%d}", date) << " " << std::format("{:%H:%M:%S}", time) << "," <<
@@ -877,8 +889,11 @@ Read measurements from glucose meter device \n\
   -d, --debug                  display debug messages\n\
   -u, --unit=UNIT              choose output measurement unit. UNIT types are [mmol] (for mmol per liter; default unit) or [mg] (mg per dL)\n\
   -s, --scan-interval=SECONDS  scan interval (in seconds). Default is 5 seconds.\n\
+  -f, --filename=FILENAME                  set output filename. Overrides automatic filename creation.\n\
 \n";
 }
+
+
 
 bool parse_options(const char **argv) {
     argh::parser cmdl({"-u", "--unit", "-f", "-s", "--scan-interval"});
@@ -929,6 +944,11 @@ bool parse_options(const char **argv) {
             std::cerr << "Invalid value for scan interval: " << scan_interval_str << '\n';
             return false;
         }
+    }
+
+    std::string filename_str = cmdl({"f", "filename"}).str();
+    if (!filename_str.empty()) {
+        provided_filename = filename_str;
     }
     
     return true;
