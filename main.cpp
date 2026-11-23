@@ -132,7 +132,7 @@ namespace {
     bool debug_messages = false;
 
     uint8_t scan_interval_secs = 5; // s
-    uint16_t user_input_timeout_ms = 20000; // ms
+    uint16_t user_input_timeout_ms = 15000; // ms
 
     std::string provided_filename;
 
@@ -174,7 +174,6 @@ namespace {
         outFile << "date_time,measured_value,meal_context\n";
 
         for (auto &[date, time, value, meal_ctx]: measurements | std::views::values) {
-
             if (output_measurement_unit == MG_PER_DL) {
                 value *= 18.02f;
             }
@@ -306,8 +305,9 @@ namespace {
                     std::cout << std::hex << std::setw(2) << std::setfill('0')
                             << static_cast<unsigned int>(flag_char) << " ";
                 }
+                std::cout << std::dec << std::endl;
             }
-            std::cout << std::dec << std::endl;
+
             const auto flags = vflags[0];
             const bool discoverable = flags & 0x01 || flags & 0x02;
             device.discoverable = discoverable;
@@ -316,7 +316,7 @@ namespace {
     }
 
 
-    void print_help(const std::string& app_name) {
+    void print_help(const std::string &app_name) {
         std::cout << "Usage: " << app_name << " [OPTION]...\n\
 Read measurements from glucose meter device \n\
 \n\
@@ -368,7 +368,9 @@ Read measurements from glucose meter device \n\
             try {
                 const auto s_interval = static_cast<uint8_t>(stoi(scan_interval_str));
                 scan_interval_secs = s_interval;
-                std::cout << "Scan interval: " << static_cast<int>(scan_interval_secs) << '\n';
+                if (debug_messages) {
+                    std::cout << "Scan interval: " << static_cast<int>(scan_interval_secs) << '\n';
+                }
             } catch ([[maybe_unused]] const std::exception &e) {
                 std::cerr << "Invalid value for scan interval: " << scan_interval_str << '\n';
                 return false;
@@ -698,30 +700,32 @@ static std::uint32_t get_passkey() {
         if (std::string passkey; std::getline(std::cin, passkey)) {
             try {
                 const auto ret_pk = static_cast<std::uint32_t>(std::stoul(passkey));
-                std::cout << "Provided passkey: " << ret_pk << "\n" << std::flush;
+                // if (debug_messages) {
+                //     std::cout << "Provided passkey: " << ret_pk << "\n";
+                // }
                 return ret_pk;
             } catch (const std::exception &e) {
-                std::cerr << "Invalid number format: " << e.what() << "\n";
-                throw DBus::Error("org.bluez.Error.Rejected", "error");
+                std::cerr << "Invalid input for passkey\n";
             }
+        } else {
+            std::cerr << "getline error" << '\n';
         }
-        std::cout << "getline error" << '\n';
-        throw DBus::Error("org.bluez.Error.Rejected", "error");
-    }
-    if (ret == 0) {
-        std::cout << "No passkey entered in time\n";
+    } else if (ret == 0) {
+        std::cout << "\nNo passkey entered in time\n";
         pairing_timed_out = true;
         throw DBus::Error("org.bluez.Error.Rejected", "timed out");
+    } else {
+        std::cerr << "Error waiting for passkey input\n";
     }
-    std::cout << "Unknown error waiting for passkey input\n";
-    throw DBus::Error("org.bluez.Error.Rejected", "error");
 
-    return 0;
+    throw DBus::Error("org.bluez.Error.Rejected", "error");
 }
 
 
 static std::uint32_t on_request_passkey(const DBus::Path &device) {
-    std::cout << "Received request for pass key for device: " << device << "\n";
+    if (debug_messages) {
+        std::cout << "Received request for pass key for device: " << device << "\n";
+    }
 
     return get_passkey();
 }
@@ -954,7 +958,9 @@ static void remove_device_from_cache() {
     );
     try {
         (*remove_device_mp)(selected_device.path);
-        std::cout << "Discovered device removed from cache\n";
+        if (debug_messages) {
+            std::cout << "Discovered device removed from cache\n";
+        }
     } catch (const DBus::Error &e) {
         std::cerr << "RemoveDevice failed: " << e.what() << "\n";
     }
@@ -1080,8 +1086,9 @@ int main(int argc, const char *argv[]) {
             std::cout << "Discovery ended.\n";
         }
 
-        std::cout << "Glucose devices found: " << glucose_devices.size() << "\n";
-
+        if (debug_messages) {
+            std::cout << "Glucose devices found: " << glucose_devices.size() << "\n";
+        }
 
         // Exit if no devices found
         if (glucose_devices.empty()) {
@@ -1115,10 +1122,13 @@ int main(int argc, const char *argv[]) {
         selected_device.pp.reset();
 
 
-        // Selected device must be discoverable if it is not bonded
-        if (!selected_device.bonded && !selected_device.discoverable) {
-            // Remove device
-            remove_device_from_cache();
+        // Selected device must be discoverable
+        if (!selected_device.discoverable) {
+
+            // Remove device if it is not bonded
+            if (!selected_device.bonded) {
+                remove_device_from_cache();
+            }
 
             std::cout << "Selected device is not discoverable. Set device to pairing mode and try again.\n";
             return EXIT_SUCCESS;
@@ -1195,10 +1205,10 @@ int main(int argc, const char *argv[]) {
             // Initiate pairing
             try {
                 (*pair_method_proxy)();
-                std::cout << "Pairing completed\n";
+                std::cout << "Pairing completed.\n";
             } catch (const DBus::ErrorNoReply &e) {
                 // Handle timeout (e.g., user took too long to enter PIN)
-                std::cerr << "Error NoReply: " << e.what() << "\n";
+                std::cerr << "Error: no reply: " << e.what() << "\n";
                 //return EXIT_FAILURE;
                 // Remove device
                 remove_device_from_cache();
@@ -1465,7 +1475,7 @@ int main(int argc, const char *argv[]) {
 
         const std::vector<uint8_t> &data = {1, 1};
 
-        std::cout << "Starting reading measurements from device\n";
+        std::cout << "Reading measurements from device.\n";
 
         try {
             (*write_value)(data, options);
@@ -1502,7 +1512,7 @@ int main(int argc, const char *argv[]) {
             return EXIT_FAILURE;
         }
 
-        std::cout << "Read " << measurements.size() << " measurements" << std::endl;
+        std::cout << "Read " << measurements.size() << " measurements." << std::endl;
 
         /*
                 // Stop notifications on characteristics
