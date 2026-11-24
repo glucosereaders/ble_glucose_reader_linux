@@ -42,12 +42,15 @@ namespace {
         bool services_resolved;
         std::string address_type;
         bool discoverable;
+        bool active;
 
-        std::shared_ptr<DBus::PropertyProxy<std::vector<uint8_t> > > pp;
+        std::shared_ptr<DBus::PropertyProxy<std::vector<uint8_t> > > adv_flags_pp;
         std::shared_ptr<DBus::ObjectProxy> op;
         std::shared_ptr<DBus::PropertyProxy<bool> > connected_pp;
         std::shared_ptr<DBus::PropertyProxy<bool> > services_resolved_pp;
-        sigc::connection pp_conn;
+        sigc::connection adv_flags_pp_conn;
+        std::shared_ptr<DBus::PropertyProxy<int16_t> > rssi_pp;
+        sigc::connection rssi_pp_conn;
 
         [[maybe_unused]] void print() const {
             std::cout << "Glucose Device:" << '\n';
@@ -63,6 +66,7 @@ namespace {
             std::cout << "Trusted: " << trusted << "\n";
             std::cout << "Services Resolved: " << services_resolved << "\n";
             std::cout << "Discoverable: " << discoverable << "\n";
+            std::cout << "Active: " << active << "\n";
         }
     };
 
@@ -278,7 +282,7 @@ namespace {
 
 
     GlucoseDevice create_device_from_properties(
-        const std::map<std::string, std::map<std::string, DBus::Variant> >::mapped_type &props) {
+        const std::map<std::string, std::map<std::string, DBus::Variant> >::mapped_type &props, bool active_device) {
         auto device = GlucoseDevice{};
         device.address = props.at("Address").to_string();
         device.address_type = props.at("AddressType").to_string();
@@ -295,22 +299,25 @@ namespace {
         device.trusted = props.at("Trusted").to_bool();
         device.services_resolved = props.at("ServicesResolved").to_bool();
 
-        if (props.contains("AdvertisingFlags")) {
-            auto data = props.at("AdvertisingFlags");
-            const auto vflags = data.to_vector<uint8_t>();
-            //std::cout << "[DBUS message] -> AdvertisingFlags: size = " << vflags.size() << "\n";
-            if (debug_messages) {
-                std::cout << " -> AdvertisingFlags: ";
-                for (const auto flag_char: vflags) {
-                    std::cout << std::hex << std::setw(2) << std::setfill('0')
-                            << static_cast<unsigned int>(flag_char) << " ";
+        if (active_device) {
+            device.active = active_device;
+            if (props.contains("AdvertisingFlags")) {
+                auto data = props.at("AdvertisingFlags");
+                const auto vflags = data.to_vector<uint8_t>();
+                //std::cout << "[DBUS message] -> AdvertisingFlags: size = " << vflags.size() << "\n";
+                if (debug_messages) {
+                    std::cout << " -> AdvertisingFlags: ";
+                    for (const auto flag_char: vflags) {
+                        std::cout << std::hex << std::setw(2) << std::setfill('0')
+                                << static_cast<unsigned int>(flag_char) << " ";
+                    }
+                    std::cout << std::dec << std::endl;
                 }
-                std::cout << std::dec << std::endl;
-            }
 
-            const auto flags = vflags[0];
-            const bool discoverable = flags & 0x01 || flags & 0x02;
-            device.discoverable = discoverable;
+                const auto flags = vflags[0];
+                const bool discoverable = flags & 0x01 || flags & 0x02;
+                device.discoverable = discoverable;
+            }
         }
         return device;
     }
@@ -386,14 +393,16 @@ Read measurements from glucose meter device \n\
 }
 
 
-static void on_properties_changed_when_scanning(const std::vector<uint8_t> &new_flags, const DBus::Path &path) {
+static void on_properties_adv_flags_changed_when_scanning(const std::vector<uint8_t> &new_flags,
+                                                          const DBus::Path &path) {
     if (new_flags.empty()) {
         return;
     }
 
     if (debug_messages) {
-        std::cout << "on_properties_changed_when_scanning: path = " << path << "\n";
-        std::cout << "on_properties_changed_when_scanning: flags = " << std::hex << std::setw(2) << std::setfill('0')
+        std::cout << "on_properties_adv_flags_changed_when_scanning: path = " << path << "\n";
+        std::cout << "on_properties_adv_flags_changed_when_scanning: flags = " << std::hex << std::setw(2) <<
+                std::setfill('0')
                 << static_cast<unsigned int>(new_flags[0]) << std::dec << std::endl;
     }
 
@@ -406,6 +415,19 @@ static void on_properties_changed_when_scanning(const std::vector<uint8_t> &new_
     }
 }
 
+
+static void on_properties_rssi_changed_when_scanning(const int16_t rssi, const DBus::Path &path) {
+    if (debug_messages) {
+        std::cout << "on_properties_rssi_changed_when_scanning: path = " << path << ", rssi = " << rssi << "\n";
+    }
+
+    const auto it = std::ranges::find_if(glucose_devices,
+                                         [&](const GlucoseDevice &d) { return d.path == path; });
+
+    if (it != glucose_devices.end()) {
+        it->active = true;
+    }
+}
 
 static void on_connected_changed_when_connecting(const bool connected, const DBus::Path &path) {
     if (debug_messages) {
@@ -636,7 +658,7 @@ static void on_properties_changed_for_glucose_measurement_context([[maybe_unused
 }
 
 
-static void add_glucose_device(DBus::Path path, InterfaceMap interfaces) {
+static void add_glucose_device(DBus::Path path, InterfaceMap interfaces, bool active_device) {
     if (interfaces.contains("org.bluez.Device1")) {
         if (const auto &props = interfaces.at("org.bluez.Device1"); props.contains("UUIDs")) {
             for (DBus::Variant uuids = props.at("UUIDs"); const auto &uuid: uuids.to_vector<std::string>()) {
@@ -653,7 +675,7 @@ static void add_glucose_device(DBus::Path path, InterfaceMap interfaces) {
                         if (debug_messages) {
                             std::cout << "Registering new device: " << path << '\n';
                         }
-                        GlucoseDevice device = create_device_from_properties(props);
+                        GlucoseDevice device = create_device_from_properties(props, active_device);
                         device.path = path;
 
 
@@ -667,11 +689,26 @@ static void add_glucose_device(DBus::Path path, InterfaceMap interfaces) {
                             "AdvertisingFlags"
                         );
                         auto adv_flags_connection = adv_flags_pp->signal_property_changed().connect(
-                            sigc::bind(sigc::ptr_fun(&on_properties_changed_when_scanning), path));
+                            sigc::bind(sigc::ptr_fun(&on_properties_adv_flags_changed_when_scanning), path));
 
                         device.op = device_op;
-                        device.pp = adv_flags_pp;
-                        device.pp_conn = adv_flags_connection;
+                        device.adv_flags_pp = adv_flags_pp;
+                        device.adv_flags_pp_conn = adv_flags_connection;
+
+                        // Add listener for updates to RSSI
+                        if (debug_messages) {
+                            std::cout << "Adding PropertiesChanged listener for RSSI" << '\n';
+                        }
+                        auto rssi_pp = device_op->create_property<int16_t>(
+                            "org.bluez.Device1",
+                            "RSSI"
+                        );
+                        auto rssi_connection = rssi_pp->signal_property_changed().connect(
+                            sigc::bind(sigc::ptr_fun(&on_properties_rssi_changed_when_scanning), path));
+
+                        device.rssi_pp = rssi_pp;
+                        device.rssi_pp_conn = rssi_connection;
+
                         glucose_devices.push_back(device);
                     } else {
                         std::cerr << "Need tp update device" << std::endl;
@@ -683,8 +720,10 @@ static void add_glucose_device(DBus::Path path, InterfaceMap interfaces) {
 }
 
 static void on_interfaces_added(const DBus::Path &path, const InterfaceMap &interfaces) {
-    //std::cout << "on_interfaces_added: path = " << path << "\n";
-    add_glucose_device(path, interfaces);
+    if (debug_messages) {
+        std::cout << "on_interfaces_added: path = " << path << "\n";
+    }
+    add_glucose_device(path, interfaces, true);
 }
 
 
@@ -742,7 +781,7 @@ void on_authorize_service(DBus::Path device, std::string uuid) {
 
 static void find_managed_glucose_devices(ManagedObjectsMap result) {
     for (auto &[path, interfaces]: result) {
-        add_glucose_device(path, interfaces);
+        add_glucose_device(path, interfaces, false);
     }
 }
 
@@ -951,30 +990,13 @@ static void init() {
 }
 
 
-static void remove_device_from_cache() {
-    const auto remove_device_mp = adapter_op->create_method<void(DBus::Path)>(
-        "org.bluez.Adapter1",
-        "RemoveDevice"
-    );
-    try {
-        (*remove_device_mp)(selected_device.path);
-        if (debug_messages) {
-            std::cout << "Discovered device removed from cache\n";
-        }
-    } catch (const DBus::Error &e) {
-        std::cerr << "RemoveDevice failed: " << e.what() << "\n";
-    }
-}
-
-
 int main(int argc, const char *argv[]) {
     if (!parse_options(argv)) {
         return EXIT_FAILURE;
     }
 
-    //return EXIT_SUCCESS;
-
     try {
+        // Initialise dbus proxies and connections
         init();
 
         // Get managed devices
@@ -1028,6 +1050,9 @@ int main(int argc, const char *argv[]) {
 
         // Restrict the physical radio scan to Low Energy (LE) only
         discovery_filter["Transport"] = DBus::Variant(std::string("le"));
+
+        // Receive duplicate data for RSSI and/or AdvFlags
+        discovery_filter["DuplicateData"] = DBus::Variant(true);
 
         // Create SetDiscoveryFilter method proxy on adapter interface
         auto set_filter_mp = adapter_op->create_method<void(PropertyMap)>(
@@ -1086,20 +1111,59 @@ int main(int argc, const char *argv[]) {
             std::cout << "Discovery ended.\n";
         }
 
+
+        // Clean up callback handlers for AdvertisingFlags
+        if (debug_messages) {
+            std::cout << "Deregistering listeners for AdvertisingFlags" << '\n';
+        }
+
+        for (auto &device: glucose_devices) {
+            device.adv_flags_pp->signal_property_changed().clear();
+            device.adv_flags_pp_conn.disconnect();
+            device.adv_flags_pp.reset();
+        }
+
+
+        // Clean up callback handlers for RSSI
+        if (debug_messages) {
+            std::cout << "Deregistering listeners for RSSI" << '\n';
+        }
+
+        for (auto &device: glucose_devices) {
+            device.rssi_pp->signal_property_changed().clear();
+            device.rssi_pp_conn.disconnect();
+            device.rssi_pp.reset();
+        }
+
+
         if (debug_messages) {
             std::cout << "Glucose devices found: " << glucose_devices.size() << "\n";
         }
 
+        uint8_t active_devices_count{};
+
+        if (debug_messages) {
+            active_devices_count = std::ranges::count_if(glucose_devices, [](const auto &item) {
+                return item.active;
+            });
+            std::cout << "Active glucose devices found: " << static_cast<int>(active_devices_count) << "\n";
+        }
+
         // Exit if no devices found
-        if (glucose_devices.empty()) {
+        if (active_devices_count == 0) {
             std::cout << "No glucose devices found. Exiting.\n";
             return EXIT_SUCCESS;
         }
 
+        // Remove all inactive devices
+        std::erase_if(glucose_devices, [](const GlucoseDevice& device) {
+            return device.active == false;
+        });
+
         // Ask user to select device if more than one is found
         // Exit if user selects invalid device
         // Select device if only one exists
-        if (glucose_devices.size() > 1) {
+        if (active_devices_count > 1) {
             std::cout << "More than one glucose device found. Please select one.\n";
             list_devices();
             if (!get_selection()) {
@@ -1113,29 +1177,21 @@ int main(int argc, const char *argv[]) {
         std::cout << "Selected device: " << selected_device.name << "\n";
 
 
-        // Clean up callback handler for AdvertisingFlags
-        if (debug_messages) {
-            std::cout << "Deregistering listener for AdvertisingFlags" << '\n';
-        }
-        selected_device.pp->signal_property_changed().clear();
-        selected_device.pp_conn.disconnect();
-        selected_device.pp.reset();
+        // Selected device must be active
+        // if (!selected_device.active) {
+        //     std::cout << "Selected device is not turned on. Turn on device and try again.\n";
+        //     return EXIT_SUCCESS;
+        // }
 
 
-        // Selected device must be discoverable
-        if (!selected_device.discoverable) {
-
-            // Remove device if it is not bonded
-            if (!selected_device.bonded) {
-                remove_device_from_cache();
-            }
-
+        // Selected device must be discoverable, if not bonded
+        if (!selected_device.bonded && !selected_device.discoverable) {
             std::cout << "Selected device is not discoverable. Set device to pairing mode and try again.\n";
             return EXIT_SUCCESS;
         }
 
         // If it is not bonded, initiate pairing
-        if (!selected_device.bonded || !selected_device.paired) {
+        if (!selected_device.bonded && selected_device.discoverable) {
             std::cout << "Device is not bonded. Pairing required.\n";
 
 
@@ -1209,10 +1265,6 @@ int main(int argc, const char *argv[]) {
             } catch (const DBus::ErrorNoReply &e) {
                 // Handle timeout (e.g., user took too long to enter PIN)
                 std::cerr << "Error: no reply: " << e.what() << "\n";
-                //return EXIT_FAILURE;
-                // Remove device
-                remove_device_from_cache();
-
                 std::abort();
             } catch (const DBus::Error &e) {
                 if (pairing_timed_out) {
@@ -1220,8 +1272,6 @@ int main(int argc, const char *argv[]) {
                 } else {
                     std::cerr << "Pairing error: name: " << e.name() << ", what: " << e.what() << std::endl;
                 }
-                // Remove device
-                remove_device_from_cache();
 
                 // Clean up callback handler for pairing and properties changed?
                 return EXIT_FAILURE;
@@ -1240,7 +1290,7 @@ int main(int argc, const char *argv[]) {
         }
 
 
-        // Connect to selected device, if not connected or serices are not resolved
+        // Connect to selected device, if not connected or services are not resolved
         if (!selected_device.connected || !selected_device.services_resolved) {
             std::cout << "Connecting to selected device.\n";
             auto connect_method_proxy = selected_device.op->create_method<void()>("org.bluez.Device1", "Connect");
@@ -1292,9 +1342,6 @@ int main(int argc, const char *argv[]) {
 
             // Check selected device is connected, exit otherwise
             if (!selected_device.connected) {
-                // Remove device
-                remove_device_from_cache();
-
                 std::cerr << "Failed to connect to selected device. Exiting.\n";
                 return EXIT_FAILURE;
             }
@@ -1327,9 +1374,6 @@ int main(int argc, const char *argv[]) {
             }
 
             if (!selected_device.services_resolved) {
-                // Remove device
-                remove_device_from_cache();
-
                 std::cerr << "Failed to resolve services. Exiting.\n";
                 return EXIT_FAILURE;
             }
@@ -1508,7 +1552,7 @@ int main(int argc, const char *argv[]) {
             std::cerr << "RACP write not completed.\n";
             std::cerr << "Read " << measurements.size() << " measurements" << std::endl;
             std::cerr << "Try to reconnect the device\n";
-            remove_device_from_cache();
+
             return EXIT_FAILURE;
         }
 
