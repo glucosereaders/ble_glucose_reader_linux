@@ -44,13 +44,20 @@ namespace {
         bool discoverable;
         bool active;
 
-        std::shared_ptr<DBus::PropertyProxy<std::vector<uint8_t> > > adv_flags_pp;
         std::shared_ptr<DBus::ObjectProxy> op;
-        std::shared_ptr<DBus::PropertyProxy<bool> > connected_pp;
-        std::shared_ptr<DBus::PropertyProxy<bool> > services_resolved_pp;
+
+        std::shared_ptr<DBus::PropertyProxy<std::vector<uint8_t> > > adv_flags_pp;
         sigc::connection adv_flags_pp_conn;
+
         std::shared_ptr<DBus::PropertyProxy<int16_t> > rssi_pp;
         sigc::connection rssi_pp_conn;
+
+        std::shared_ptr<DBus::PropertyProxy<bool> > connected_pp;
+        sigc::connection connected_pp_conn;
+
+        std::shared_ptr<DBus::PropertyProxy<bool> > services_resolved_pp;
+        sigc::connection services_resolved_pp_conn;
+
 
         [[maybe_unused]] void print() const {
             std::cout << "Glucose Device:" << '\n';
@@ -112,6 +119,7 @@ namespace {
     Characteristic glucose_measurement_characteristic{};
     Characteristic glucose_measurement_context_characteristic{};
 
+    std::mutex devices_vector_mutex;
     std::mutex writing_mutex;
     std::condition_variable writing_cv;
     bool racp_writing_completed = false;
@@ -210,7 +218,7 @@ namespace {
     std::tuple<std::uint16_t, Measurement> get_measurement(const std::vector<uint8_t> &value) {
         const auto flags = value[0];
         const bool time_offset_field_present = (flags & (1 << 0)) != 0;
-        //bool glucose_concentration_and_type_sample_location_present = ((flags & (1 << 1)) != 0);
+        bool glucose_concentration_and_type_sample_location_present = ((flags & (1 << 1)) != 0);
         const bool glucose_concentration_in_units_of_mol_per_l = (flags & (1 << 2)) != 0;
         //bool sensor_status_annunciation_field_present = ((flags & (1 << 3)) != 0);
         //bool record_includes_context_information = ((flags & (1 << 4)) != 0);
@@ -231,8 +239,14 @@ namespace {
 
         auto time_offset = 0;
         if (time_offset_field_present) {
-            time_offset = static_cast<std::uint16_t>(value[10] | (value[11] << 8));
+            time_offset = static_cast<std::int16_t>(value[10] | (value[11] << 8));
             //std::cout << "[DBUS message] -> Time offset: " << time_offset << "\n";
+        }
+
+        if (time_offset < 0) {
+            if (debug_messages) {
+                std::cout << "time_offset is negative: " << time_offset << "\n";
+            }
         }
 
         const auto tp = std::chrono::sys_days(ymd) + hms.to_duration() + std::chrono::minutes(time_offset);
@@ -240,11 +254,18 @@ namespace {
         const std::chrono::year_month_day new_ymd{dp};
         const std::chrono::hh_mm_ss new_tod{tp - dp};
 
+
         // base units conversion
 
         auto inc_exp = 3; // convert from mol/L to mmol/L
         if (!glucose_concentration_in_units_of_mol_per_l) {
             inc_exp = 5; // convert from kg/L to mg/dl
+        }
+
+        if (!glucose_concentration_and_type_sample_location_present) {
+            if (debug_messages) {
+                std::cout << "glucose_concentration_and_type_sample_location_present is false\n";
+            }
         }
 
         float measured_value = time_offset_field_present
@@ -286,7 +307,9 @@ namespace {
         auto device = GlucoseDevice{};
         device.address = props.at("Address").to_string();
         device.address_type = props.at("AddressType").to_string();
-        device.name = props.at("Name").to_string();
+        if (props.contains("Name")) {
+            device.name = props.at("Name").to_string();
+        }
         device.connected = props.at("Connected").to_bool();
         if (props.contains("Appearance")) {
             device.appearance = props.at("Appearance").to_uint16();
@@ -406,12 +429,15 @@ static void on_properties_adv_flags_changed_when_scanning(const std::vector<uint
                 << static_cast<unsigned int>(new_flags[0]) << std::dec << std::endl;
     }
 
-    const auto it = std::ranges::find_if(glucose_devices,
-                                         [&](const GlucoseDevice &d) { return d.path == path; });
+    {
+        std::scoped_lock lock(devices_vector_mutex);
+        const auto it = std::ranges::find_if(glucose_devices,
+                                             [&](const GlucoseDevice &d) { return d.path == path; });
 
-    if (it != glucose_devices.end()) {
-        const bool discoverable = new_flags[0] & 0x01 || new_flags[0] & 0x02;
-        it->discoverable = discoverable;
+        if (it != glucose_devices.end()) {
+            const bool discoverable = new_flags[0] & 0x01 || new_flags[0] & 0x02;
+            it->discoverable = discoverable;
+        }
     }
 }
 
@@ -421,11 +447,14 @@ static void on_properties_rssi_changed_when_scanning(const int16_t rssi, const D
         std::cout << "on_properties_rssi_changed_when_scanning: path = " << path << ", rssi = " << rssi << "\n";
     }
 
-    const auto it = std::ranges::find_if(glucose_devices,
-                                         [&](const GlucoseDevice &d) { return d.path == path; });
+    {
+        std::scoped_lock lock(devices_vector_mutex);
+        const auto it = std::ranges::find_if(glucose_devices,
+                                             [&](const GlucoseDevice &d) { return d.path == path; });
 
-    if (it != glucose_devices.end()) {
-        it->active = true;
+        if (it != glucose_devices.end()) {
+            it->active = true;
+        }
     }
 }
 
@@ -601,6 +630,26 @@ static void on_properties_changed_for_racp([[maybe_unused]] const std::string &i
             }
         }
         std::cout << "\n";
+
+        if (value.size() != 4) {
+            std::cerr << "Invalid response size: " << value.size() << "\n";
+        } else {
+
+            if (value[0] != 0x06 || value[1] != 0x00 || value[2] != 0x01) {
+                std::cerr << "Invalid response (unexpected op code): " << std::hex << std::uppercase << std::setfill('0') << std::setw(2) << static_cast<int>(value[0]) << std::dec << "\n";
+            }
+
+            if (value[3] == 0x06) {
+                std::cout << "No records found on device\n";
+            }
+
+            if (value[3] == 0x08) {
+                std::cerr << "Retrieving records from device did not complete\n";
+            }
+
+        }
+
+
         {
             std::lock_guard lock(writing_mutex);
             racp_writing_completed = true;
@@ -627,6 +676,9 @@ static void on_properties_changed_for_glucose_measurement_context([[maybe_unused
     }
 
     if (changed_props.contains("Value")) {
+
+        // TODO:  handle optional flags correcly
+
         const std::vector<uint8_t> value = changed_props.at("Value").to_vector<uint8_t>();
         //std::cout << " -> Value: ";
         // for (auto i: value) {
@@ -635,24 +687,34 @@ static void on_properties_changed_for_glucose_measurement_context([[maybe_unused
         // }
         // std::cout << "\n";
 
-        //auto flags = value[0];
+        auto flags = value[0];
+        bool has_meal = (flags & (1 << 1)) != 0;
+
+        // if (debug_messages) {
+        //     std::cout << "flags: " << std::hex << std::uppercase << std::setfill('0') << std::setw(2) << static_cast<int>(
+        //         flags) << std::dec << "\n";
+        //     std::cout << "has_meal: " << std::boolalpha << has_meal << std::noboolalpha << "\n";
+        // }
         auto seqno = static_cast<std::uint16_t>(value[1] | (value[2] << 8));
-        const auto ctx = value[3];
 
-        // std::cout << "flags: " << std::hex << std::uppercase << std::setfill('0') << std::setw(2) << static_cast<int>(
-        //     flags) << std::dec << "\n";
-        // std::cout << "seqno: " << seqno << "\n";
-        // std::cout << "ctx: " << std::hex << std::uppercase << std::setfill('0') << std::setw(2) << static_cast<int>(ctx)
-        //         << std::dec << "\n";
+        if (has_meal) {
+            const auto ctx = value[3];
 
-        // Update if measurement entry exists for key
-        if (measurements.contains(seqno)) {
-            auto old_measurement = measurements[seqno];
-            old_measurement.meal_ctx = ctx;
-            measurements[seqno] = old_measurement;
-        } else {
-            Measurement mval{.meal_ctx = ctx};
-            measurements.insert({seqno, mval});
+            // std::cout << "flags: " << std::hex << std::uppercase << std::setfill('0') << std::setw(2) << static_cast<int>(
+            //     flags) << std::dec << "\n";
+            // std::cout << "seqno: " << seqno << "\n";
+            // std::cout << "ctx: " << std::hex << std::uppercase << std::setfill('0') << std::setw(2) << static_cast<int>(ctx)
+            //         << std::dec << "\n";
+
+            // Update if measurement entry exists for key
+            if (measurements.contains(seqno)) {
+                auto old_measurement = measurements[seqno];
+                old_measurement.meal_ctx = ctx;
+                measurements[seqno] = old_measurement;
+            } else {
+                Measurement mval{.meal_ctx = ctx};
+                measurements.insert({seqno, mval});
+            }
         }
     }
 }
@@ -667,11 +729,19 @@ static void add_glucose_device(DBus::Path path, InterfaceMap interfaces, bool ac
                     // for (const auto &[key, value]: props) {
                     //     std::cout << "Key: " << key << '\n';
                     // }
-                    // check to see if the device is already discovered
-                    auto it = std::ranges::find_if(glucose_devices,
-                                                   [&](const GlucoseDevice &d) { return d.path == path; });
 
-                    if (it == glucose_devices.end()) {
+
+                    // check to see if the device is already discovered
+                    std::vector<GlucoseDevice>::iterator it;
+                    bool found;
+                    {
+                        std::scoped_lock lock(devices_vector_mutex);
+                        it = std::ranges::find_if(glucose_devices,
+                                                  [&](const GlucoseDevice &d) { return d.path == path; });
+                        found = (it == glucose_devices.end());
+                    }
+
+                    if (found) {
                         if (debug_messages) {
                             std::cout << "Registering new device: " << path << '\n';
                         }
@@ -699,7 +769,7 @@ static void add_glucose_device(DBus::Path path, InterfaceMap interfaces, bool ac
                         if (debug_messages) {
                             std::cout << "Adding PropertiesChanged listener for RSSI" << '\n';
                         }
-                        auto rssi_pp = device_op->create_property<int16_t>(
+                        auto rssi_pp = device.op->create_property<int16_t>(
                             "org.bluez.Device1",
                             "RSSI"
                         );
@@ -709,7 +779,10 @@ static void add_glucose_device(DBus::Path path, InterfaceMap interfaces, bool ac
                         device.rssi_pp = rssi_pp;
                         device.rssi_pp_conn = rssi_connection;
 
-                        glucose_devices.push_back(device);
+                        {
+                            std::scoped_lock lock(devices_vector_mutex);
+                            glucose_devices.push_back(device);
+                        }
                     } else {
                         std::cerr << "Need tp update device" << std::endl;
                     }
@@ -718,6 +791,7 @@ static void add_glucose_device(DBus::Path path, InterfaceMap interfaces, bool ac
         }
     }
 }
+
 
 static void on_interfaces_added(const DBus::Path &path, const InterfaceMap &interfaces) {
     if (debug_messages) {
@@ -787,9 +861,12 @@ static void find_managed_glucose_devices(ManagedObjectsMap result) {
 
 static void list_devices() {
     int count = 1;
-    for (const auto &device: glucose_devices) {
-        std::cout << "[" << count << "] " << device.name << "\n";
-        count++;
+    {
+        std::scoped_lock lock(devices_vector_mutex);
+        for (const auto &device: glucose_devices) {
+            std::cout << "[" << count << "] " << device.name << "\n";
+            count++;
+        }
     }
 }
 
@@ -805,10 +882,19 @@ static bool get_selection() {
     if (ret > 0 && pfd.revents & POLLIN) {
         if (std::string dev_number; std::getline(std::cin, dev_number)) {
             try {
-                if (debug_messages) {
-                    std::cout << std::format("\nSelected: {}\n", glucose_devices[std::stoi(dev_number) - 1].name);
+                {
+                    std::scoped_lock lock(devices_vector_mutex);
+                    int dev_index = std::stoi(dev_number) - 1;
+                    if (dev_index < 0 || dev_index >= glucose_devices.size()) {
+                        std::cerr << "\nInvalid device number\n";
+                        return false;
+                    }
+                    if (debug_messages) {
+
+                        std::cout << std::format("\nSelected: {}\n", glucose_devices[dev_index].name);
+                    }
+                    selected_device = glucose_devices[dev_index];
                 }
-                selected_device = glucose_devices[std::stoi(dev_number) - 1];
                 return true;
             } catch (const std::exception &e) {
                 std::cerr << "\nInvalid number format: " << e.what() << "\n";
@@ -990,6 +1076,41 @@ static void init() {
 }
 
 
+void clean_up_pairing_listeners(std::shared_ptr<DBus::Object> pairing_agent,
+                                std::shared_ptr<DBus::ObjectProxy> bluez_manager_op,
+                                std::shared_ptr<DBus::SignalProxy<void(std::string,
+                                                                       std::map<std::string, DBus::Variant>,
+                                                                       std::vector<std::string>)> > device_props_signal,
+                                sigc::connection properties_changed_conn) {
+    // Clean up properties changed callback
+    properties_changed_conn.disconnect();
+    device_props_signal.reset();
+
+    auto un_register_mp = bluez_manager_op->create_method<void(DBus::Path)>(
+        "org.bluez.AgentManager1",
+        "UnregisterAgent");
+
+    // Unregister agent
+    try {
+        (*un_register_mp)(pairing_agent->path());
+    } catch (const DBus::Error &e) {
+        // silent ignore
+    }
+
+    pairing_agent->unregister();
+
+    if (debug_messages) {
+        std::cout << "Unregistered pairing agent\n";
+    }
+}
+
+void clean_up_connected_and_services_resolved() {
+    selected_device.connected_pp_conn.disconnect();
+    selected_device.connected_pp.reset();
+    selected_device.services_resolved_pp_conn.disconnect();
+    selected_device.services_resolved_pp.reset();
+}
+
 int main(int argc, const char *argv[]) {
     if (!parse_options(argv)) {
         return EXIT_FAILURE;
@@ -1003,8 +1124,9 @@ int main(int argc, const char *argv[]) {
         if (debug_messages) {
             std::cout << "Retrieving managed objects." << '\n';
         }
+        auto object_manager_ip = bluez_root_op->getObjectManagerInterface();
+        auto managed_objects_result = object_manager_ip->GetManagedObjects();
 
-        auto managed_objects_result = bluez_root_op->getObjectManagerInterface()->GetManagedObjects();
         if (debug_messages) {
             std::cout << "Managed objects retrieved.\n";
         }
@@ -1027,12 +1149,9 @@ int main(int argc, const char *argv[]) {
 
         // Set up BLE discovery listeners
 
-        // Create SignalProxy for InterfacesAdded signals
-        auto interfaces_added_sp = bluez_root_op->getObjectManagerInterface()->create_signal<void(
-            DBus::Path, InterfaceMap)>("InterfacesAdded");
-
-        // Attach function handler
-        auto interface_added_conn = interfaces_added_sp->connect(sigc::ptr_fun(&on_interfaces_added));
+        // Attach function handler to InterfaceAdded
+        auto interface_added_conn = object_manager_ip->signal_InterfacesAdded().connect(
+            sigc::ptr_fun(&on_interfaces_added));
         if (debug_messages) {
             std::cout << "Registered listener for InterfacesAdded.\n";
         }
@@ -1099,12 +1218,7 @@ int main(int argc, const char *argv[]) {
         }
 
         // Clean up callback for InterfacesAdded
-        if (auto signal_removed = bluez_root_op->getObjectManagerInterface()->remove_signal(interfaces_added_sp); !
-            signal_removed) {
-            std::cerr << "Failed to remove interfaces added signal.\n";
-        }
         interface_added_conn.disconnect();
-        interfaces_added_sp.reset();
 
         if (debug_messages) {
             std::cout << "Deregistered listener for InterfacesAdded.\n";
@@ -1117,10 +1231,12 @@ int main(int argc, const char *argv[]) {
             std::cout << "Deregistering listeners for AdvertisingFlags" << '\n';
         }
 
-        for (auto &device: glucose_devices) {
-            device.adv_flags_pp->signal_property_changed().clear();
-            device.adv_flags_pp_conn.disconnect();
-            device.adv_flags_pp.reset();
+        {
+            std::scoped_lock lock(devices_vector_mutex);
+            for (auto &device: glucose_devices) {
+                device.adv_flags_pp_conn.disconnect();
+                device.adv_flags_pp.reset();
+            }
         }
 
 
@@ -1129,10 +1245,12 @@ int main(int argc, const char *argv[]) {
             std::cout << "Deregistering listeners for RSSI" << '\n';
         }
 
-        for (auto &device: glucose_devices) {
-            device.rssi_pp->signal_property_changed().clear();
-            device.rssi_pp_conn.disconnect();
-            device.rssi_pp.reset();
+        {
+            std::scoped_lock lock(devices_vector_mutex);
+            for (auto &device: glucose_devices) {
+                device.rssi_pp_conn.disconnect();
+                device.rssi_pp.reset();
+            }
         }
 
 
@@ -1140,12 +1258,17 @@ int main(int argc, const char *argv[]) {
             std::cout << "Glucose devices found: " << glucose_devices.size() << "\n";
         }
 
-        uint8_t active_devices_count{};
+        uint8_t active_devices_count = 0;
 
-        if (debug_messages) {
+
+        {
+            std::scoped_lock lock(devices_vector_mutex);
             active_devices_count = std::ranges::count_if(glucose_devices, [](const auto &item) {
                 return item.active;
             });
+        }
+
+        if (debug_messages) {
             std::cout << "Active glucose devices found: " << static_cast<int>(active_devices_count) << "\n";
         }
 
@@ -1156,10 +1279,13 @@ int main(int argc, const char *argv[]) {
         }
 
         // Remove all inactive devices
-        std::erase_if(glucose_devices, [](const GlucoseDevice& device) {
-            return device.active == false;
-        });
+        {
+            std::unique_lock lock(devices_vector_mutex);
 
+            std::erase_if(glucose_devices, [](const GlucoseDevice &device) {
+                return device.active == false;
+            });
+        }
         // Ask user to select device if more than one is found
         // Exit if user selects invalid device
         // Select device if only one exists
@@ -1263,10 +1389,16 @@ int main(int argc, const char *argv[]) {
                 (*pair_method_proxy)();
                 std::cout << "Pairing completed.\n";
             } catch (const DBus::ErrorNoReply &e) {
+                clean_up_pairing_listeners(pairing_agent, bluez_manager_op, device_props_signal,
+                                           properties_changed_conn);
+
                 // Handle timeout (e.g., user took too long to enter PIN)
                 std::cerr << "Error: no reply: " << e.what() << "\n";
                 std::abort();
             } catch (const DBus::Error &e) {
+                clean_up_pairing_listeners(pairing_agent, bluez_manager_op, device_props_signal,
+                                           properties_changed_conn);
+
                 if (pairing_timed_out) {
                     std::cerr << "Pairing error: timed out" << std::endl;
                 } else {
@@ -1277,12 +1409,7 @@ int main(int argc, const char *argv[]) {
                 return EXIT_FAILURE;
             }
 
-
-            // Clean up properties changed callback
-            properties_changed_conn.disconnect();
-            device_props_signal.reset();
-
-            // Clean up callback handler for pairing?
+            clean_up_pairing_listeners(pairing_agent, bluez_manager_op, device_props_signal, properties_changed_conn);
         } else {
             if (debug_messages) {
                 std::cout << "Device is already bonded\n";
@@ -1301,7 +1428,7 @@ int main(int argc, const char *argv[]) {
                 "org.bluez.Device1",
                 "Connected"
             );
-            selected_device.connected_pp->signal_property_changed().connect(
+            selected_device.connected_pp_conn = selected_device.connected_pp->signal_property_changed().connect(
                 sigc::bind(sigc::ptr_fun(&on_connected_changed_when_connecting), selected_device.path));
 
 
@@ -1309,8 +1436,9 @@ int main(int argc, const char *argv[]) {
                 "org.bluez.Device1",
                 "ServicesResolved"
             );
-            selected_device.services_resolved_pp->signal_property_changed().connect(
-                sigc::bind(sigc::ptr_fun(&on_services_resolved_changed_when_connecting), selected_device.path));
+            selected_device.services_resolved_pp_conn = selected_device.services_resolved_pp->signal_property_changed().
+                    connect(
+                        sigc::bind(sigc::ptr_fun(&on_services_resolved_changed_when_connecting), selected_device.path));
 
 
             // Blocking call, wait for max 5 second
@@ -1342,7 +1470,11 @@ int main(int argc, const char *argv[]) {
 
             // Check selected device is connected, exit otherwise
             if (!selected_device.connected) {
+                clean_up_connected_and_services_resolved();
+
                 std::cerr << "Failed to connect to selected device. Exiting.\n";
+
+
                 return EXIT_FAILURE;
             }
 
@@ -1365,6 +1497,8 @@ int main(int argc, const char *argv[]) {
                 });
             }
 
+            clean_up_connected_and_services_resolved();
+
             if (debug_messages) {
                 std::cout << "Device bonded: " << std::boolalpha << selected_device.bonded << std::noboolalpha << "\n";
                 std::cout << "Device connected: " << std::boolalpha << selected_device.connected << std::noboolalpha <<
@@ -1385,7 +1519,7 @@ int main(int argc, const char *argv[]) {
 
 
         // Retrieve GATT services from managed objects
-        managed_objects_result = bluez_root_op->getObjectManagerInterface()->GetManagedObjects();
+        managed_objects_result = object_manager_ip->GetManagedObjects();
         if (debug_messages) {
             std::cout << "Managed objects retrieved.\n";
         }
@@ -1558,50 +1692,55 @@ int main(int argc, const char *argv[]) {
 
         std::cout << "Read " << measurements.size() << " measurements." << std::endl;
 
-        /*
-                // Stop notifications on characteristics
-                auto racp_stop_notify_mp = racp_characteristic_op->create_method<void()>(
-                    "org.bluez.GattCharacteristic1",
-                    "StopNotify"
-                );
-                try {
-                    (*racp_stop_notify_mp)();
-                    std::cout << "Sent RACP StopNotify to device.\n";
-                } catch (const DBus::Error &e) {
-                    std::cerr << "RACP StopNotify failed: " << e.name() << " - " << e.message() << std::endl;
+
+        // Stop notifications on characteristics
+        auto racp_stop_notify_mp = racp_characteristic_op->create_method<void()>(
+            "org.bluez.GattCharacteristic1",
+            "StopNotify"
+        );
+        try {
+            (*racp_stop_notify_mp)();
+            if (debug_messages) {
+                std::cout << "Sent RACP StopNotify to device.\n";
+            }
+        } catch (const DBus::Error &e) {
+            std::cerr << "RACP StopNotify failed: " << e.name() << " - " << e.message() << std::endl;
+        }
+
+
+        if (!glucose_measurement_context_characteristic.uuid.empty()) {
+            auto glucose_measurement_context_stop_notify_mp = glucose_measurement_context_characteristic_op->
+                    create_method<void()>(
+                        "org.bluez.GattCharacteristic1",
+                        "StopNotify"
+                    );
+            try {
+                (*glucose_measurement_context_stop_notify_mp)();
+                if (debug_messages) {
+                    std::cout << "Sent glucose measurement context StopNotify to device.\n";
                 }
+            } catch (const DBus::Error &e) {
+                std::cerr << "glucose measurement context StopNotify failed: " << e.name() << " - " << e.message() <<
+                        std::endl;
+            }
+        }
+
+        auto glucose_measurement_stop_notify_mp = glucose_measurement_characteristic_op->create_method<void()>(
+            "org.bluez.GattCharacteristic1",
+            "StopNotify"
+        );
+        try {
+            (*glucose_measurement_stop_notify_mp)();
+            if (debug_messages) {
+                std::cout << "Sent glucose measurement StopNotify to device.\n";
+            }
+        } catch (const DBus::Error &e) {
+            std::cerr << "glucose measurement StopNotify failed: " << e.name() << " - " << e.message() << std::endl;
+        }
 
 
-                if (!glucose_measurement_context_characteristic.uuid.empty()) {
-                    auto glucose_measurement_context_stop_notify_mp = glucose_measurement_context_characteristic_op->
-                            create_method<void()>(
-                                "org.bluez.GattCharacteristic1",
-                                "StopNotify"
-                            );
-                    try {
-                        (*glucose_measurement_context_stop_notify_mp)();
-                        std::cout << "Sent glucose measurement context StopNotify to device.\n";
-                    } catch (const DBus::Error &e) {
-                        std::cerr << "glucose measurement context StopNotify failed: " << e.name() << " - " << e.message() <<
-                                std::endl;
-                    }
-                }
-
-                auto glucose_measurement_stop_notify_mp = glucose_measurement_characteristic_op->create_method<void()>(
-                    "org.bluez.GattCharacteristic1",
-                    "StopNotify"
-                );
-                try {
-                    (*glucose_measurement_stop_notify_mp)();
-                    std::cout << "Sent glucose measurement StopNotify to device.\n";
-                } catch (const DBus::Error &e) {
-                    std::cerr << "glucose measurement StopNotify failed: " << e.name() << " - " << e.message() << std::endl;
-                }
-
-        */
         // Clean up connection
         auto disconnect_method_proxy = selected_device.op->create_method<void()>("org.bluez.Device1", "Disconnect");
-        //auto disconnect_call = disconnect_method_proxy->create_call_message();
 
         // Disconnect device
         try {
